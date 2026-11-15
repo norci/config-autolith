@@ -7,9 +7,11 @@
 ;;; registers the proxy's ACP tools natively and stamps cooperative-plugin
 ;;; headers so the proxy stops injecting the same tools at the wire level.
 ;;;
-;;; This file is the Autolith counterpart: it registers a bili tool namespace
-;;; and routes model traffic through the proxy, which is what lets compress
-;;; fold the conversation. A dead proxy costs one failed attempt, never a turn.
+;;; This file is the Autolith counterpart of that plugin at the same three
+;;; points: it registers the bili tool namespace, routes model traffic through
+;;; the proxy, and decides compaction from the proxy's own wire reading instead
+;;; of Autolith's stored-history estimate. A dead proxy costs one failed
+;;; attempt, never a turn.
 ;;;
 ;;; Start the proxy with `bili start`, then load this file from init.lisp:
 ;;;
@@ -470,39 +472,89 @@ failure instead of silently showing nothing."
             (values nil (format nil "the proxy answered HTTP ~D for the status request." status))))
     (error (condition)
       (values nil (princ-to-string condition)))))
+
+;;;; -- Wire reading --
+
+(defvar *bili-status-cache* (make-hash-table :test #'equal)
+  "The last proxy status per conversation identifier, paired with its read time.")
+
+(defparameter *bili-status-cache-seconds* 5
+  "How long one status reading answers later questions in the same turn.")
+
+(-> bili--live-status (conversation) (option hash-table))
+(defun bili--live-status (conversation)
+  "Return CONVERSATION's proxy status, re-reading it once the cache expires.
+
+The proxy answers with its latest session when it does not hold this one, so a
+status naming another conversation, or one the proxy reached by falling back, is
+no status for this conversation."
+  (let* ((identifier (conversation-identifier conversation))
+         (cached     (gethash identifier *bili-status-cache*))
+         (now        (get-universal-time)))
+    (if (and cached (< (- now (cdr cached)) *bili-status-cache-seconds*))
+        (car cached)
+        (multiple-value-bind (status error) (bili--compression-status conversation)
+          (declare (ignore error))
+          (let ((own (and status
+                          (equal identifier (gethash "conversationId" status))
+                          (not (gethash "fallback" status))
+                          status)))
+            (setf (gethash identifier *bili-status-cache*) (cons own now))
+            own)))))
+
+(-> bili--wire-usage (conversation) (values (option integer) (option integer)))
+(defun bili--wire-usage (conversation)
+  "Return the proxy's measured wire token reading and window for CONVERSATION.
+
+Both values are NIL when the plugin is inactive, the proxy holds no session for
+this conversation, or its reading recomputes host occupancy instead of reporting
+provider usage, so callers fall back to Autolith's own accounting."
+  (when *bili-active-p*
+    (let ((status (bili--live-status conversation)))
+      (when (and status (equal "usage" (gethash "contextTokensSource" status)))
+        (let ((tokens (gethash "contextTokens" status))
+              (limit  (gethash "contextLimit" status)))
+          (when (and (integerp tokens) (integerp limit) (plusp limit))
+            (values tokens limit)))))))
+
+
 ;;;; -- Compression prompt --
 
-(defparameter *bili-compression-minimum-total-tokens* 64000
-  "Compressible tokens required before the prompt reaches the agent.
+(defparameter *bili-compression-trigger-share* 0.75
+  "Share of the window at which the compression prompt reaches the agent.
 
-A smaller total stays silent: reminding the agent about a few thousand
-tokens costs more than the fold saves.")
+The proxy reports the folded request's occupancy, so the trigger is a fraction
+of the window rather than a token count that suits one model only.")
+
+(defparameter *bili-compaction-reserve-share* 0.95
+  "Wire occupancy above which the proxy's folding no longer stands in for compaction.
+
+Below this share the proxy keeps every request inside the window, so a durable
+summary would replace history the wire never carried.")
 
 (-> bili--compression-prompt (conversation) (option string))
 (defun bili--compression-prompt (conversation)
-  "Return the compression prompt for CONVERSATION, or NIL when little is due.
+  "Return the compression prompt for CONVERSATION while its wire reading is due.
 
-The proxy reports compressible ranges; the prompt appears only once their
-total passes *bili-compression-minimum-total-tokens*, and then names every
-range so the agent can fold them in one call."
-  (when *bili-active-p*
-    (let* ((status  (bili--compression-status conversation))
-           (reported (and status (gethash "compressibleRanges" status)))
-           (entries  (and reported (coerce reported 'list)))
-           (total    (loop for range in entries
-                           for tokens = (gethash "tokens" range)
-                           when (integerp tokens)
-                             sum tokens)))
-      (when (and total (> total *bili-compression-minimum-total-tokens*))
-        (with-output-to-string (stream)
-          (format stream "Context compression is due: ~D compressible tokens across these ranges.~%"
-                  total)
-          (dolist (range entries)
-            (format stream "- ~A-~A (~D tokens)~%"
-                    (gethash "startRef" range)
-                    (gethash "endRef" range)
-                    (gethash "tokens" range)))
-          (format stream "~%Write one summary per range and call the compress tool once, with content = one string holding every block: each block starts with its 'm00150-m00220 optional topic' header line followed by that block's summary. Keep exact file paths, symbol names, error strings, numbers, decisions and their reasons. Ranges the proxy did not list are not compressible."))))))
+The proxy reports how much of the window the folded request occupies, so the
+prompt appears once that reading passes *bili-compression-trigger-share* of the
+window, and then names every compressible range so the agent folds them at once."
+  (multiple-value-bind (tokens limit) (bili--wire-usage conversation)
+    (when (and tokens limit
+               (> tokens (* *bili-compression-trigger-share* limit)))
+      (let* ((status   (bili--live-status conversation))
+             (reported (and status (gethash "compressibleRanges" status)))
+             (entries  (and reported (coerce reported 'list))))
+        (when entries
+          (with-output-to-string (stream)
+            (format stream "Context compression is due: the request carries ~D of ~D window tokens.~%"
+                    tokens limit)
+            (dolist (range entries)
+              (format stream "- ~A-~A (~D tokens)~%"
+                      (gethash "startRef" range)
+                      (gethash "endRef" range)
+                      (gethash "tokens" range)))
+            (format stream "~%Write one summary per range and call the compress tool once, with content = one string holding every block: each block starts with its 'm00150-m00220 optional topic' header line followed by that block's summary. Keep exact file paths, symbol names, error strings, numbers, decisions and their reasons. Ranges the proxy did not list are not compressible.")))))))
 
 (-> bili--compression-contribution (conversation) (option t))
 (defun bili--compression-contribution (conversation)
@@ -527,3 +579,22 @@ range so the agent can fold them in one call."
 
 (register-context-contributor "billion-context-compression"
                               #'bili-context-contributor)
+
+;;;; -- Compaction interception --
+
+(-> bili-suppresses-compaction-p (conversation) boolean)
+(defun bili-suppresses-compaction-p (conversation)
+  "Return true while the proxy's wire reading leaves compaction nothing to do."
+  (multiple-value-bind (tokens limit) (bili--wire-usage conversation)
+    (and tokens limit
+         (< tokens (* *bili-compaction-reserve-share* limit)))))
+
+(defmethod agent-should-compact-p :around ((agent agent))
+  "Ask the compression proxy before stored history decides to compact.
+
+billion-context folds the outgoing request, so a conversation whose wire
+occupancy stays inside the window needs no durable summary. Autolith's own
+estimate counts unfolded stored history and would compact on every turn."
+  (if (bili-suppresses-compaction-p (agent-conversation agent))
+      nil
+      (call-next-method)))
