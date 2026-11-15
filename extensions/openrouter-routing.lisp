@@ -29,7 +29,7 @@
 (defparameter *openrouter-routing-minimum-uptime* 100
   "Smallest acceptable uptime percentage over the five and thirty minute windows.")
 
-(defparameter *openrouter-routing-input-tokens-per-output-token* 60d0
+(defparameter *openrouter-routing-input-tokens-per-output-token* 70d0
   "Fallback prompt-to-completion token ratio for cost blending.")
 
 (defparameter *openrouter-routing-cache-hit-rate* 0.9d0
