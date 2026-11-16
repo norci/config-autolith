@@ -13,4 +13,4 @@
    :priority 200
    :lifetime ':turn
    :instruction
-   (format nil "~{~&- ~A~%~}" *prompt-reminder-lines*)))
+   (format nil "<reminder>~{~&- ~A~%~}</reminder>" *prompt-reminder-lines*)))
