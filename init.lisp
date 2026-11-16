@@ -14,6 +14,7 @@
         "personal-instructions"
         "prompt-guard"
         "skill-catalog-compact"
+        "always-selected-skills"
 	))
 
 (setf *conversation-title-generation-output-tokens* 4096)
