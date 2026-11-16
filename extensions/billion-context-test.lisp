@@ -11,7 +11,8 @@
   (let ((saved (mapcar (lambda (binding) (cons (car binding) (symbol-function (car binding)))) bindings)))
     (unwind-protect
          (progn (dolist (binding bindings) (setf (symbol-function (car binding)) (cdr binding)))
-                (funcall thunk))
+                  (clrhash *bili-status-cache*)
+                  (funcall thunk))
       (dolist (pair saved) (setf (symbol-function (car pair)) (cdr pair))))))
 
 (defun billion-context-test--range (tokens start-ref end-ref)
@@ -21,9 +22,14 @@
           (gethash "endRef" range) end-ref)
     range))
 
-(defun billion-context-test--status (ranges)
+(defun billion-context-test--status (ranges &optional (conversation *billion-context-test-a*))
   (let ((status (make-hash-table :test #'equal)))
-    (setf (gethash "compressibleRanges" status) (coerce ranges 'vector))
+    (setf (gethash "conversationId" status) (conversation-identifier conversation)
+          (gethash "compressibleRanges" status) (coerce ranges 'vector)
+          (gethash "contextTokensSource" status) "usage"
+          (gethash "contextTokens" status)
+          (loop for range in ranges sum (gethash "tokens" range))
+          (gethash "contextLimit" status) 70000)
     status))
 
 (defun billion-context-test--case-prompt-due ()
@@ -38,7 +44,7 @@
      (lambda ()
        (let ((prompt (bili--compression-prompt *billion-context-test-a*)))
          (assert (stringp prompt))
-         (assert (search "60000 compressible tokens" prompt))
+         (assert (search "60000 of 70000 window tokens" prompt))
          (assert (search "m1-m2" prompt))
          (assert (search "compress tool" prompt))
          (assert (bili--compression-contribution *billion-context-test-a*)))))))
@@ -70,7 +76,7 @@
      (lambda ()
        (let ((prompt (bili--compression-prompt *billion-context-test-a*)))
          (assert (stringp prompt))
-         (assert (search "60000 compressible tokens" prompt))
+         (assert (search "60000 of 70000 window tokens" prompt))
          (assert (search "m1-m2" prompt))
          (assert (search "m3-m4" prompt))
          (assert (search "m5-m6" prompt)))))))
@@ -142,4 +148,59 @@
   (billion-context-test--case-ensure-proxy-attaches)
   (billion-context-test--case-ensure-proxy-starts)
   (billion-context-test--case-ensure-proxy-disabled)
+    (billion-context-test--case-replay-installs-reading)
+    (billion-context-test--case-replay-skips-without-application)
   :passed)
+
+(defun billion-context-test--case-replay-installs-reading ()
+  (let* ((application (make-instance 'application))
+         (*bili-active-p* t)
+         (*active-application* application))
+    (setf (application-provider application) nil
+          (application-tool-registry application) (make-instance 'tool-registry))
+    (setf (conversation-context-usage-sample *billion-context-test-a*) nil)
+    (billion-context-test--with-stubs
+     (list (cons 'application-provider
+                 (lambda (application) (declare (ignore application)) :provider-stub))
+           (cons 'application-tool-registry
+                 (lambda (application) (declare (ignore application)) :registry-stub))
+           (cons 'bili--request-fingerprints
+                 (lambda (conversation provider registry)
+                   (declare (ignore conversation))
+                   (assert (eq provider :provider-stub))
+                   (assert (eq registry :registry-stub))
+                   (values nil :digest (list :policy :p :prompt :q :tool-header :t) :header)))
+           (cons 'conversation--persisted-model-selection-p
+                 (lambda (&rest arguments) (declare (ignore arguments)) t))
+           (cons 'provider-context--sample-matches-p
+                 (lambda (&rest arguments) (declare (ignore arguments)) nil))
+           (cons 'bili--wire-usage
+                 (lambda (conversation) (declare (ignore conversation)) (values 1234 200000)))
+           (cons 'bili--context-usage-sample
+                 (lambda (conversation provider registry tokens)
+                   (declare (ignore conversation))
+                   (assert (eq provider :provider-stub))
+                   (assert (eq registry :registry-stub))
+                   (list :format 2 :tokens tokens))))
+     (lambda ()
+       (conversation--project-record :configuration *billion-context-test-a*
+                                     '(:model "stub-model" :reasoning-effort nil))
+       (assert (eql 1234 (getf (conversation-context-usage-sample *billion-context-test-a*) :tokens)))))))
+
+(defun billion-context-test--case-replay-skips-without-application ()
+  (let ((*bili-active-p* t)
+        (*active-application* nil)
+        (sample-calls 0))
+    (setf (conversation-context-usage-sample *billion-context-test-a*) nil)
+    (billion-context-test--with-stubs
+     (list (cons 'conversation--persisted-model-selection-p
+                 (lambda (&rest arguments) (declare (ignore arguments)) t))
+           (cons 'bili--context-usage-sample
+                 (lambda (&rest arguments)
+                   (declare (ignore arguments))
+                   (incf sample-calls))))
+     (lambda ()
+       (conversation--project-record :configuration *billion-context-test-a*
+                                     '(:model "stub-model" :reasoning-effort nil))
+       (assert (zerop sample-calls))
+       (assert (null (conversation-context-usage-sample *billion-context-test-a*)))))))

@@ -525,20 +525,17 @@ provider usage, so callers fall back to Autolith's own accounting."
               (limit  (gethash "contextLimit" status)))
           (when (and (integerp tokens) (integerp limit) (plusp limit))
             (values tokens limit)))))))
-(defun bili--request-fingerprints (agent)
-  "Return the request fingerprints describing AGENT's next request.
+(defun bili--request-fingerprints (conversation provider registry)
+  "Return the request fingerprints describing the request CONVERSATION will send.
 
-Values are the per-item cache-prefix entries, their combined digest, the
-header components, and the soft header. The estimator compares a stored
-sample against exactly these, so the builder and the match test describe
-one request."
-  (let* ((conversation (agent-conversation agent))
-         (provider     (agent-provider agent))
-         (registry     (agent-tool-registry agent))
-         (tools        (if registry (tool-registry-provider-schemas registry) #()))
-         (items        (conversation-input-items-for-family
-                        conversation (provider-family provider)))
-         (entries      (mapcar #'provider-cache-prefix--entry items)))
+PROVIDER and REGISTRY describe the serving model and its tools. Values are the
+per-item cache-prefix entries, their combined digest, the header components,
+and the soft header. The estimator compares a stored sample against exactly
+these, so the builder, the match test and the replay hook describe one request."
+  (let* ((tools   (if registry (tool-registry-provider-schemas registry) #()))
+         (items   (conversation-input-items-for-family
+                   conversation (provider-family provider)))
+         (entries (mapcar #'provider-cache-prefix--entry items)))
     (values entries
             (provider-cache-prefix--entry (coerce entries 'vector))
             (provider-context--header-components provider tools)
@@ -615,15 +612,15 @@ window, and then names every compressible range so the agent folds them at once.
   (multiple-value-bind (tokens limit) (bili--wire-usage conversation)
     (and tokens limit
          (< tokens (* *bili-compaction-reserve-share* limit)))))
-(-> bili--context-usage-sample (agent integer) (option list))
-(defun bili--context-usage-sample (agent tokens)
-  "Return format-two context evidence reporting TOKENS for AGENT's request.
+(-> bili--context-usage-sample (conversation t t integer) (option list))
+(defun bili--context-usage-sample (conversation provider registry tokens)
+  "Return format-two context evidence reporting TOKENS for one request.
 
 The proxy measured the request that crossed the wire; these fingerprints
 describe the same conversation and tools, so the estimate follows the proxy
 reading until the next request replaces the sample."
   (multiple-value-bind (entries digest components header)
-      (bili--request-fingerprints agent)
+      (bili--request-fingerprints conversation provider registry)
     (when (and header components)
       (list :format               2
             :soft-header          header
@@ -638,40 +635,53 @@ reading until the next request replaces the sample."
             :wire-digest          digest
             :tokens               tokens
             :temporary-characters 0))))
-(-> bili--adopt-context-usage (agent) null)
-(defun bili--adopt-context-usage (agent)
-  "Install the proxy's measured size when AGENT's stored sample no longer applies.
+(-> bili--adopt-context-usage-for (conversation t t) (option list))
+(defun bili--adopt-context-usage-for (conversation provider registry)
+  "Install the proxy's measured size when CONVERSATION's stored sample no longer applies.
 
 A resumed conversation replays its durable records, and any published
 configuration, compaction or ownership change discards the measured sample.
 The estimator then sums stored history the folded wire never carried. The
 proxy still describes the same request, so its reading replaces that sum
 until the next request measures the conversation again."
-  (let ((conversation (agent-conversation agent))
-        (provider     (agent-provider agent)))
-    (when (and conversation provider)
-      (multiple-value-bind (entries digest components header)
-          (bili--request-fingerprints agent)
-        (declare (ignore digest))
-        (unless (provider-context--sample-matches-p
-                 (conversation-context-usage-sample conversation)
-                 header entries
-                 :components components)
-          (multiple-value-bind (tokens limit) (bili--wire-usage conversation)
-            (declare (ignore limit))
-            (when (and tokens (plusp tokens))
-              (let ((sample (bili--context-usage-sample agent tokens)))
-                (when sample
-                  (setf (conversation-context-usage-sample conversation)
-                        sample))))))))))
+  (when (and conversation provider)
+    (multiple-value-bind (entries digest components header)
+        (bili--request-fingerprints conversation provider registry)
+      (declare (ignore digest))
+      (unless (provider-context--sample-matches-p
+               (conversation-context-usage-sample conversation)
+               header entries
+               :components components)
+        (multiple-value-bind (tokens limit) (bili--wire-usage conversation)
+          (declare (ignore limit))
+          (when (and tokens (plusp tokens))
+            (let ((sample (bili--context-usage-sample conversation provider registry tokens)))
+              (when sample
+                (setf (conversation-context-usage-sample conversation) sample)))))))))
+(defmethod conversation--project-record :after
+    ((kind (eql :configuration)) conversation properties)
+  "Reinstall the proxy reading when a replayed configuration record discards it.
+
+Replay discards measured usage for a configuration change, which leaves the
+estimator summing stored history the folded wire never carried. The proxy
+still describes the same request, so install its reading again. The replay
+runs before the application installs this conversation, so the provider bound
+there decides whether the reading still applies; a different model or endpoint
+leaves the estimate alone."
+  (declare (ignore properties))
+  (let ((application *active-application*))
+    (when application
+      (bili--adopt-context-usage-for
+       conversation
+       (and (slot-boundp application 'provider) (application-provider application))
+       (and (slot-boundp application 'tool-registry)
+            (application-tool-registry application))))))
 
 (defmethod agent-should-compact-p :around ((agent agent))
-  "Ask the compression proxy before stored history decides to compact.
-
-billion-context folds the outgoing request, so a conversation whose wire
-occupancy stays inside the window needs no durable summary. Autolith's own
-estimate counts unfolded stored history and would compact on every turn."
-  (bili--adopt-context-usage agent)
+  "Follow the proxy's reading instead of summing stored history it never carried."
+  (bili--adopt-context-usage-for (agent-conversation agent)
+                                 (agent-provider agent)
+                                 (agent-tool-registry agent))
   (if (bili-suppresses-compaction-p (agent-conversation agent))
       nil
       (call-next-method)))
