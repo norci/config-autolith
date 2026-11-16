@@ -525,6 +525,24 @@ provider usage, so callers fall back to Autolith's own accounting."
               (limit  (gethash "contextLimit" status)))
           (when (and (integerp tokens) (integerp limit) (plusp limit))
             (values tokens limit)))))))
+(defun bili--request-fingerprints (agent)
+  "Return the request fingerprints describing AGENT's next request.
+
+Values are the per-item cache-prefix entries, their combined digest, the
+header components, and the soft header. The estimator compares a stored
+sample against exactly these, so the builder and the match test describe
+one request."
+  (let* ((conversation (agent-conversation agent))
+         (provider     (agent-provider agent))
+         (registry     (agent-tool-registry agent))
+         (tools        (if registry (tool-registry-provider-schemas registry) #()))
+         (items        (conversation-input-items-for-family
+                        conversation (provider-family provider)))
+         (entries      (mapcar #'provider-cache-prefix--entry items)))
+    (values entries
+            (provider-cache-prefix--entry (coerce entries 'vector))
+            (provider-context--header-components provider tools)
+            (provider-context--soft-header provider tools))))
 
 
 ;;;; -- Compression prompt --
@@ -604,16 +622,8 @@ window, and then names every compressible range so the agent folds them at once.
 The proxy measured the request that crossed the wire; these fingerprints
 describe the same conversation and tools, so the estimate follows the proxy
 reading until the next request replaces the sample."
-  (let* ((conversation (agent-conversation agent))
-         (provider     (agent-provider agent))
-         (registry     (agent-tool-registry agent))
-         (tools        (if registry (tool-registry-provider-schemas registry) #()))
-         (items        (conversation-input-items-for-family
-                        conversation (provider-family provider)))
-         (entries      (mapcar #'provider-cache-prefix--entry items))
-         (digest       (provider-cache-prefix--entry (coerce entries 'vector)))
-         (components   (provider-context--header-components provider tools))
-         (header       (provider-context--soft-header provider tools)))
+  (multiple-value-bind (entries digest components header)
+      (bili--request-fingerprints agent)
     (when (and header components)
       (list :format               2
             :soft-header          header
@@ -630,23 +640,30 @@ reading until the next request replaces the sample."
             :temporary-characters 0))))
 (-> bili--adopt-context-usage (agent) null)
 (defun bili--adopt-context-usage (agent)
-  "Install the proxy's measured size when AGENT's conversation carries none.
+  "Install the proxy's measured size when AGENT's stored sample no longer applies.
 
-A resumed conversation normally restores its own measured sample, which the
-estimate grows with the history added since. When that evidence is gone, the
-proxy's reading still describes the same request, so the estimate follows it
-instead of summing stored history the folded wire never carried."
+A resumed conversation replays its durable records, and any published
+configuration, compaction or ownership change discards the measured sample.
+The estimator then sums stored history the folded wire never carried. The
+proxy still describes the same request, so its reading replaces that sum
+until the next request measures the conversation again."
   (let ((conversation (agent-conversation agent))
         (provider     (agent-provider agent)))
-    (when (and conversation provider
-               (not (conversation-context-usage-sample-p
-                     (conversation-context-usage-sample conversation))))
-      (multiple-value-bind (tokens limit) (bili--wire-usage conversation)
-        (declare (ignore limit))
-        (when (and tokens (plusp tokens))
-          (let ((sample (bili--context-usage-sample agent tokens)))
-            (when sample
-              (setf (conversation-context-usage-sample conversation) sample))))))))
+    (when (and conversation provider)
+      (multiple-value-bind (entries digest components header)
+          (bili--request-fingerprints agent)
+        (declare (ignore digest))
+        (unless (provider-context--sample-matches-p
+                 (conversation-context-usage-sample conversation)
+                 header entries
+                 :components components)
+          (multiple-value-bind (tokens limit) (bili--wire-usage conversation)
+            (declare (ignore limit))
+            (when (and tokens (plusp tokens))
+              (let ((sample (bili--context-usage-sample agent tokens)))
+                (when sample
+                  (setf (conversation-context-usage-sample conversation)
+                        sample))))))))))
 
 (defmethod agent-should-compact-p :around ((agent agent))
   "Ask the compression proxy before stored history decides to compact.
