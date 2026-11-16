@@ -40,11 +40,14 @@
   (length lines))
 
 (defun line-indentation (line)
-  "Return the number of leading spaces in LINE."
-  (or (position-if (lambda (character) (not (char= character #\Space))) line) 0))
+  "Return the number of leading spaces in LINE, or its length when all of it is spaces."
+  (or (position-if-not (lambda (character) (char= character #\Space)) line)
+      (length line)))
 
 (defun count-substring (needle text)
   "Return how many non-overlapping times NEEDLE occurs in TEXT."
+  (when (zerop (length needle))
+    (error "count-substring needs a non-empty NEEDLE."))
   (loop with start = 0
         for position = (search needle text :start2 start)
         while position
@@ -53,6 +56,8 @@
 
 (defun replace-all-text (text old new)
   "Replace every occurrence of OLD in TEXT with NEW. Argument order is TEXT first."
+  (when (zerop (length old))
+    (error "replace-all-text needs a non-empty OLD."))
   (with-output-to-string (out)
     (let ((start 0)
           (width (length old)))
@@ -71,8 +76,13 @@
 (defun form-line-range (path name)
   "Return the 1-based first and last line of the top-level definition named NAME."
   (let* ((lines (coerce (uiop:read-file-lines path) 'vector))
-         (needle (format nil "(defun ~A " name))
-         (start (position-if (lambda (line) (search needle line)) lines)))
+         (needle (format nil "(defun ~A" name))
+         (start (position-if (lambda (line)
+                               (let ((at (search needle line)))
+                                 (and at
+                                      (or (= (length line) (+ at (length needle)))
+                                          (find (char line (+ at (length needle))) " ()")))))
+                             lines)))
     (unless start
       (error "No definition named ~A in ~A." name path))
     (let ((depth 0)
@@ -162,11 +172,13 @@ range leaves PATH untouched and reports its range and error type."
 
 
 (defun file-reads-completely-p (path)
+  "Return true when every form in PATH reads without error."
   (handler-case
       (with-open-file (in path :direction :input)
-        (loop for form = (read in nil :eof)
-              until (eq form :eof)
-              finally (return t)))
+        (let ((*read-eval* nil))
+          (loop for form = (read in nil :eof)
+                until (eq form :eof)
+                finally (return t))))
     (error () nil)))
 
 (defun replace-range (path start end lines)
@@ -203,3 +215,142 @@ range leaves PATH untouched and reports its range and error type."
                             (values t (length (uiop:read-file-lines path)) n)))
                (write-lines path original)
                (values nil nil nil)))))))
+(defun slice-lines (path from to &key number)
+  "Return lines FROM..TO of PATH, 1-based and inclusive, clamped to the file.
+With NUMBER, prefix each line with its line number."
+  (let* ((lines (coerce (uiop:read-file-lines path) 'vector))
+         (count (length lines))
+         (start (max 1 (min from count)))
+         (end   (max start (min to count))))
+    (with-output-to-string (out)
+      (when (plusp count)
+        (loop for index from start to end
+              do (when number (format out "~D: " index))
+                 (write-string (aref lines (1- index)) out)
+                 (write-char #\Newline out))))))
+
+(defun grep-lines (path needle)
+  "Return (LINE-NUMBER . TEXT) for each line of PATH containing NEEDLE."
+  (loop for line in (uiop:read-file-lines path)
+        for index from 1
+        when (search needle line)
+          collect (cons index line)))
+
+(defun edit-file (path pairs &key (form-delta 0))
+  "Replace each (OLD NEW) of PAIRS in PATH, each OLD occurring exactly once.
+
+Write nothing unless every OLD is unique and the result reads as complete
+top-level forms whose count is the original count plus FORM-DELTA.  A NEW text
+that misses the OLD text's delimiter balance is adjusted at its end and reported
+as :REPAIRED.  Refuse every other imbalance."
+  (labels ((count-forms (text)
+             (handler-case
+                 (with-input-from-string (in text)
+                   (let ((*read-eval* nil))
+                     (loop for form = (read in nil :eof)
+                           until (eq form :eof)
+                           count 1)))
+               (error () nil)))
+           (paren-balance (text)
+             "Return TEXT's net count of unclosed open delimiters."
+             (let ((index 0) (limit (length text)) (balance 0))
+               (flet ((skip-string ()
+                        (incf index)
+                        (loop while (< index limit)
+                              for character = (char text index)
+                              do (incf index)
+                                 (cond ((char= character #\\) (incf index))
+                                       ((char= character #\") (return)))))
+                      (skip-block-comment ()
+                        (incf index 2)
+                        (loop while (< index limit)
+                              do (if (and (char= (char text index) #\|)
+                                          (< (1+ index) limit)
+                                          (char= (char text (1+ index)) #\#))
+                                     (progn (incf index 2) (return))
+                                     (incf index)))))
+                 (loop while (< index limit)
+                       for character = (char text index)
+                       do (cond
+                            ((char= character #\;)
+                             (setf index (or (position #\Newline text :start index) limit)))
+                            ((char= character #\") (skip-string))
+                            ((and (char= character #\#) (< (1+ index) limit)
+                                  (char= (char text (1+ index)) #\|))
+                             (skip-block-comment))
+                            ((and (char= character #\#) (< (1+ index) limit)
+                                  (char= (char text (1+ index)) #\\))
+                             (incf index 2))
+                            ((char= character #\() (incf balance) (incf index))
+                            ((char= character #\)) (decf balance) (incf index))
+                            (t (incf index)))))
+               balance))
+           (adjust-parens (text adjustment)
+             "Return TEXT with ADJUSTMENT closing delimiters added or removed at its end, or NIL."
+             (let ((body (string-right-trim '(#\Newline #\Space #\Tab) text)))
+               (cond
+                 ((plusp adjustment)
+                  (concatenate 'string body
+                               (make-string adjustment :initial-element #\))
+                               (string #\Newline)))
+                 ((minusp adjustment)
+                  (let ((end (length body)))
+                    (loop repeat (- adjustment)
+                          while (and (plusp end) (char= (char body (1- end)) #\)))
+                          do (decf end))
+                    (when (= end (- (length body) (- adjustment)))
+                      (concatenate 'string (subseq body 0 end) (string #\Newline)))))
+                 (t
+                  text)))))
+    (let* ((text     (uiop:read-file-string path))
+           (original (count-forms text))
+           (repaired 0)
+           (failures '()))
+      (when (null original)
+        (return-from edit-file
+          (list :applied 0 :failures (list (list :unreadable path)))))
+      (dolist (pair pairs)
+        (destructuring-bind (old new) pair
+          (let ((hits (count-substring old text)))
+            (if (= hits 1)
+                (let* ((delta (- (paren-balance new) (paren-balance old)))
+                       (fixed (if (zerop delta) new (adjust-parens new delta))))
+                  (if (null fixed)
+                      (push (list :unbalanced-replacement
+                                  :adjustment delta
+                                  :needle (subseq new 0 (min 60 (length new))))
+                            failures)
+                      (progn
+                        (setf text (replace-all-text text old fixed))
+                        (incf repaired delta))))
+                (push (list :hits hits
+                            :needle (subseq old 0 (min 60 (length old))))
+                      failures)))))
+      (cond
+        (failures
+         (list :applied 0 :failures (nreverse failures)))
+        ((eql (count-forms text) (+ original form-delta))
+         (with-open-file (out path :direction :output :if-exists :supersede)
+           (write-string text out))
+         (list :applied (length pairs) :failures nil :repaired repaired))
+        (t
+         (list :applied 0
+               :failures (list (list :unbalanced (count-forms text)
+                                     :expected (+ original form-delta)))))))))
+
+(defun form-count (text)
+  "Return how many top-level forms TEXT holds; signals on unbalanced input."
+  (with-input-from-string (in text)
+    (let ((*read-eval* nil))
+      (loop for form = (read in nil :eof)
+            until (eq form :eof)
+            count 1))))
+
+(defun edit-file-lines (path pairs)
+  "Replace each (OLD-LINES NEW-LINES) of PAIRS in PATH, each OLD occurring exactly once.
+OLD-LINES and NEW-LINES are lists of lines joined with newlines, so multi-line
+edits need no escape characters. Write nothing unless every OLD is unique."
+  (edit-file path (mapcar (lambda (pair)
+                            (list (join-lines (first pair))
+                                  (join-lines (second pair))))
+                          pairs)))
