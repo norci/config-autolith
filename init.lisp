@@ -5,12 +5,15 @@
 (mapc (lambda (name)
         (load (merge-pathnames (format nil "autolith/extensions/~A.lisp" name)
                                (uiop:xdg-config-home))))
-      '("openrouter-routing"
-        ;; "billion-context"
-        "personal-instructions"
-        "mcp-loopback"
-        "prompt-guard"
+      '(
+	"openrouter-routing"
+        "billion-context"
         "lisp-ast-tools"
-        "lsp-reminder"))
+        "lsp-reminder"
+        "mcp-loopback"
+        "personal-instructions"
+        "prompt-guard"
+        "skill-catalog-compact"
+	))
 
 (setf *conversation-title-generation-output-tokens* 4096)
