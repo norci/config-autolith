@@ -8,14 +8,7 @@
 
 
 (DEFPARAMETER *PROMPT-GUARD-REPLACEMENTS*
-  '(("Perform any additional steps you identify instead of handing them back\\s+as suggestions\\."
-     "Report any additional steps you identify and wait for the user's authorization before performing them. The harness does not compensate for your own mistakes.")
-    ("Self-modification is a routine way to remove Autolith-side friction or\\s+improve workflows\\."
-     "Self-modification is a deliberate change the user authorizes; friction caused by your own output is not an Autolith defect.")
-    ("Small reversible internal improvements within existing authority need\\s+no extra permission; report them afterward\\."
-     "Small reversible internal improvements within existing authority still need the user's authorization; report them afterward.")
-    ("Persist end-to-end whenever feasible, including through failed tool\\s+calls\\."
-     "Persist toward the goal end-to-end. A failed tool call is a parameter error, not a reason to resend the same call: read the error, change the arguments, and continue.")
+  '(
     ("After starting one,\\s+continue independent work or end your turn; never poll it with\\s+=job\\.get=\\s+or\\s+=job\\.wait=\\s*\\."
      "After =async: true=, do work that does not need the result, or end the turn and let the wakeup continue it. A =job.get= or =job.wait= on a job you started in this turn buys nothing and costs a full paid request, so one call is already too many: the call is forbidden.")
     ("Read =job\\.get= or the job's logs only when the\\s+preview is not enough\\."
