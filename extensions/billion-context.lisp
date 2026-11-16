@@ -436,6 +436,18 @@ slow answer cannot stretch the wait past that deadline."
                (when (>= (get-internal-real-time) deadline)
                  (return nil))
                (sleep 0.25))))))
+(-> bili--activate-proxy () boolean)
+(defun bili--activate-proxy ()
+  "Route provider traffic to a reachable proxy and record that it is active.
+
+Activation also runs at load time, when a cold machine or a missing PATH entry
+may leave nothing answering yet; asking again on the first real request keeps a
+late proxy from being unused for the rest of the session."
+  (when (bili-ensure-proxy)
+    (setf *bili-active-p* t)
+    (when (and *bili-route-provider-traffic-p* (boundp '*configuration*))
+      (bili-route-provider-endpoint))
+    t))
 (defvar *bili-registry-wrapper* nil
   "The exact wrapper this file installed on MAKE-DEFAULT-TOOL-REGISTRY.")
 
@@ -447,10 +459,7 @@ slow answer cannot stretch the wait past that deadline."
           (symbol-function 'make-default-tool-registry)
           *bili-registry-wrapper*)))
 
-(when (bili-ensure-proxy)
-  (setf *bili-active-p* t)
-  (when (and *bili-route-provider-traffic-p* (boundp '*configuration*))
-    (bili-route-provider-endpoint)))
+(bili--activate-proxy)
 
 ;;;; -- Compression status --
 
@@ -506,10 +515,10 @@ no status for this conversation."
 (defun bili--wire-usage (conversation)
   "Return the proxy's measured wire token reading and window for CONVERSATION.
 
-Both values are NIL when the plugin is inactive, the proxy holds no session for
-this conversation, or its reading recomputes host occupancy instead of reporting
+Both values are NIL when no proxy answers, the proxy holds no session for this
+conversation, or its reading recomputes host occupancy instead of reporting
 provider usage, so callers fall back to Autolith's own accounting."
-  (when *bili-active-p*
+  (when (or *bili-active-p* (bili--activate-proxy))
     (let ((status (bili--live-status conversation)))
       (when (and status (equal "usage" (gethash "contextTokensSource" status)))
         (let ((tokens (gethash "contextTokens" status))
@@ -588,6 +597,56 @@ window, and then names every compressible range so the agent folds them at once.
   (multiple-value-bind (tokens limit) (bili--wire-usage conversation)
     (and tokens limit
          (< tokens (* *bili-compaction-reserve-share* limit)))))
+(-> bili--context-usage-sample (agent integer) (option list))
+(defun bili--context-usage-sample (agent tokens)
+  "Return format-two context evidence reporting TOKENS for AGENT's request.
+
+The proxy measured the request that crossed the wire; these fingerprints
+describe the same conversation and tools, so the estimate follows the proxy
+reading until the next request replaces the sample."
+  (let* ((conversation (agent-conversation agent))
+         (provider     (agent-provider agent))
+         (registry     (agent-tool-registry agent))
+         (tools        (if registry (tool-registry-provider-schemas registry) #()))
+         (items        (conversation-input-items-for-family
+                        conversation (provider-family provider)))
+         (entries      (mapcar #'provider-cache-prefix--entry items))
+         (digest       (provider-cache-prefix--entry (coerce entries 'vector)))
+         (components   (provider-context--header-components provider tools))
+         (header       (provider-context--soft-header provider tools)))
+    (when (and header components)
+      (list :format               2
+            :soft-header          header
+            :policy               (getf components :policy)
+            :prompt               (getf components :prompt)
+            :tool-header          (getf components :tool-header)
+            :history-count        (length entries)
+            :history-digest       digest
+            :wire-fields          nil
+            :encoder-fields       nil
+            :wire-count           0
+            :wire-digest          digest
+            :tokens               tokens
+            :temporary-characters 0))))
+(-> bili--adopt-context-usage (agent) null)
+(defun bili--adopt-context-usage (agent)
+  "Install the proxy's measured size when AGENT's conversation carries none.
+
+A resumed conversation normally restores its own measured sample, which the
+estimate grows with the history added since. When that evidence is gone, the
+proxy's reading still describes the same request, so the estimate follows it
+instead of summing stored history the folded wire never carried."
+  (let ((conversation (agent-conversation agent))
+        (provider     (agent-provider agent)))
+    (when (and conversation provider
+               (not (conversation-context-usage-sample-p
+                     (conversation-context-usage-sample conversation))))
+      (multiple-value-bind (tokens limit) (bili--wire-usage conversation)
+        (declare (ignore limit))
+        (when (and tokens (plusp tokens))
+          (let ((sample (bili--context-usage-sample agent tokens)))
+            (when sample
+              (setf (conversation-context-usage-sample conversation) sample))))))))
 
 (defmethod agent-should-compact-p :around ((agent agent))
   "Ask the compression proxy before stored history decides to compact.
@@ -595,6 +654,7 @@ window, and then names every compressible range so the agent folds them at once.
 billion-context folds the outgoing request, so a conversation whose wire
 occupancy stays inside the window needs no durable summary. Autolith's own
 estimate counts unfolded stored history and would compact on every turn."
+  (bili--adopt-context-usage agent)
   (if (bili-suppresses-compaction-p (agent-conversation agent))
       nil
       (call-next-method)))

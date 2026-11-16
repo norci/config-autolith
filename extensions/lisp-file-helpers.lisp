@@ -9,6 +9,7 @@
     (make-package :autolith :use '(:cl))))
 
 (in-package #:autolith)
+(declaim (ftype function slice-lines brief-text form-count form-count-or-nil))
 
 (defun split-lines (text)
   "Split TEXT at newlines, dropping the empty tail a final newline produces."
@@ -117,6 +118,14 @@
             finally (unless end
                       (error "Definition ~A in ~A never closes." name path)))
       (values (1+ start) (1+ end)))))
+
+(defun form-source (path name)
+  "Return the complete source text of the top-level DEFUN named NAME in PATH.
+Return NIL when PATH holds no such definition."
+  (handler-case
+      (multiple-value-bind (start end) (form-line-range path name)
+        (slice-lines path start end))
+    (error () nil)))
 
 (defun splice-file-lines (path start end text)
   "Replace lines START through END (1-based, inclusive) in PATH with TEXT.
@@ -236,21 +245,24 @@ With NUMBER, prefix each line with its line number."
         when (search needle line)
           collect (cons index line)))
 
-(defun edit-file (path pairs &key (form-delta 0))
+
+
+(defun edit-file (path pairs)
   "Replace each (OLD NEW) of PAIRS in PATH, each OLD occurring exactly once.
 
-Write nothing unless every OLD is unique and the result reads as complete
-top-level forms whose count is the original count plus FORM-DELTA.  A NEW text
-that misses the OLD text's delimiter balance is adjusted at its end and reported
-as :REPAIRED.  Refuse every other imbalance."
+Nothing is written unless every OLD is unique, every NEW reads as complete
+top-level forms once its delimiter balance matches its OLD's, and the result
+holds as many top-level forms as the original plus the deltas the replacements
+themselves imply, so callers never count forms.  A NEW whose delimiter balance
+differs from its OLD's is adjusted at its end and reported as :REPAIRED."
   (labels ((count-forms (text)
              (handler-case
-                 (with-input-from-string (in text)
-                   (let ((*read-eval* nil))
-                     (loop for form = (read in nil :eof)
-                           until (eq form :eof)
-                           count 1)))
-               (error () nil)))
+              (with-input-from-string (in text)
+                (let ((*read-eval* nil))
+                  (loop for form = (read in nil :eof)
+                        until (eq form :eof)
+                        count 1)))
+              (error nil nil)))
            (paren-balance (text)
              "Return TEXT's net count of unclosed open delimiters."
              (let ((index 0) (limit (length text)) (balance 0))
@@ -258,9 +270,11 @@ as :REPAIRED.  Refuse every other imbalance."
                         (incf index)
                         (loop while (< index limit)
                               for character = (char text index)
-                              do (incf index)
-                                 (cond ((char= character #\\) (incf index))
-                                       ((char= character #\") (return)))))
+                              do (incf index) (cond
+                                               ((char= character #\\)
+                                                (incf index))
+                                               ((char= character #\")
+                                                (return)))))
                       (skip-block-comment ()
                         (incf index 2)
                         (loop while (< index limit)
@@ -272,72 +286,91 @@ as :REPAIRED.  Refuse every other imbalance."
                  (loop while (< index limit)
                        for character = (char text index)
                        do (cond
-                            ((char= character #\;)
-                             (setf index (or (position #\Newline text :start index) limit)))
-                            ((char= character #\") (skip-string))
-                            ((and (char= character #\#) (< (1+ index) limit)
-                                  (char= (char text (1+ index)) #\|))
-                             (skip-block-comment))
-                            ((and (char= character #\#) (< (1+ index) limit)
-                                  (char= (char text (1+ index)) #\\))
-                             (incf index 2))
-                            ((char= character #\() (incf balance) (incf index))
-                            ((char= character #\)) (decf balance) (incf index))
-                            (t (incf index)))))
+                           ((char= character #\;)
+                            (setf index
+                                    (or (position #\Newline text :start index)
+                                        limit)))
+                           ((char= character #\") (skip-string))
+                           ((and (char= character #\#) (< (1+ index) limit)
+                                 (char= (char text (1+ index)) #\|))
+                            (skip-block-comment))
+                           ((and (char= character #\#) (< (1+ index) limit)
+                                 (char= (char text (1+ index)) #\\))
+                            (incf index 2))
+                           ((char= character #\() (incf balance) (incf index))
+                           ((char= character #\)) (decf balance) (incf index))
+                           (t (incf index)))))
                balance))
            (adjust-parens (text adjustment)
              "Return TEXT with ADJUSTMENT closing delimiters added or removed at its end, or NIL."
-             (let ((body (string-right-trim '(#\Newline #\Space #\Tab) text)))
+             (let ((body (string-right-trim '(#\Newline #\  #\Tab) text)))
                (cond
-                 ((plusp adjustment)
-                  (concatenate 'string body
-                               (make-string adjustment :initial-element #\))
-                               (string #\Newline)))
-                 ((minusp adjustment)
-                  (let ((end (length body)))
-                    (loop repeat (- adjustment)
-                          while (and (plusp end) (char= (char body (1- end)) #\)))
-                          do (decf end))
-                    (when (= end (- (length body) (- adjustment)))
-                      (concatenate 'string (subseq body 0 end) (string #\Newline)))))
-                 (t
-                  text)))))
-    (let* ((text     (uiop:read-file-string path))
-           (original (count-forms text))
+                ((plusp adjustment)
+                 (concatenate 'string body
+                              (make-string adjustment :initial-element #\))
+                              (string #\Newline)))
+                ((minusp adjustment)
+                 (let ((end (length body)))
+                   (loop repeat (- adjustment)
+                         while (and (plusp end)
+                                    (char= (char body (1- end)) #\)))
+                         do (decf end))
+                   (when (= end (- (length body) (- adjustment)))
+                     (concatenate 'string (subseq body 0 end)
+                                  (string #\Newline)))))
+                (t text)))))
+    (let* ((text (uiop/stream:read-file-string path))
+           (original (form-count text))
            (repaired 0)
-           (failures '()))
-      (when (null original)
-        (return-from edit-file
-          (list :applied 0 :failures (list (list :unreadable path)))))
+           (delta 0)
+           (failures 'nil))
       (dolist (pair pairs)
-        (destructuring-bind (old new) pair
+        (destructuring-bind
+            (old new)
+            pair
           (let ((hits (count-substring old text)))
-            (if (= hits 1)
-                (let* ((delta (- (paren-balance new) (paren-balance old)))
-                       (fixed (if (zerop delta) new (adjust-parens new delta))))
-                  (if (null fixed)
-                      (push (list :unbalanced-replacement
-                                  :adjustment delta
-                                  :needle (subseq new 0 (min 60 (length new))))
-                            failures)
-                      (progn
-                        (setf text (replace-all-text text old fixed))
-                        (incf repaired delta))))
-                (push (list :hits hits
-                            :needle (subseq old 0 (min 60 (length old))))
-                      failures)))))
-      (cond
-        (failures
-         (list :applied 0 :failures (nreverse failures)))
-        ((eql (count-forms text) (+ original form-delta))
-         (with-open-file (out path :direction :output :if-exists :supersede)
-           (write-string text out))
-         (list :applied (length pairs) :failures nil :repaired repaired))
-        (t
-         (list :applied 0
-               :failures (list (list :unbalanced (count-forms text)
-                                     :expected (+ original form-delta)))))))))
+            (if (/= hits 1)
+                (push (list :hits hits :needle (brief-text old)) failures)
+                (let* ((old-forms (form-count-or-nil old))
+                       (adjustment (- (paren-balance new) (paren-balance old)))
+                       (fixed
+                        (if (zerop adjustment)
+                            new
+                            (adjust-parens new adjustment)))
+                       (new-forms (and fixed (form-count-or-nil fixed))))
+                  (cond
+                   ((null old-forms)
+                    (push (list :incomplete-needle :needle (brief-text old))
+                          failures))
+                   ((null fixed)
+                    (push
+                     (list :unbalanced-replacement :adjustment adjustment
+                           :needle (brief-text new))
+                     failures))
+                   ((null new-forms)
+                    (push
+                     (list :incomplete-replacement :needle (brief-text new))
+                     failures))
+                   (t (setf text (replace-all-text text old fixed))
+                    (incf repaired adjustment)
+                    (incf delta (- new-forms old-forms)))))))))
+      (cond (failures (list :applied 0 :failures (nreverse failures)))
+            ((eql (form-count-or-nil text) (+ original delta))
+             (with-open-file
+                 (out path :direction :output :if-exists :supersede)
+               (write-string text out))
+             (list :applied (length pairs) :failures nil :repaired repaired))
+            (t
+             (list :applied 0 :failures
+                   (list
+                    (list :unbalanced (form-count-or-nil text) :expected
+                          (+ original delta)))))))))(defun form-count-or-nil (text)
+  "Return how many top-level forms TEXT holds, or NIL when they do not read."
+  (handler-case (form-count text) (error () nil)))
 
+(defun brief-text (text)
+  "Return at most TEXT's first 60 characters, for a short report."
+  (subseq text 0 (min 60 (length text))))
 (defun form-count (text)
   "Return how many top-level forms TEXT holds; signals on unbalanced input."
   (with-input-from-string (in text)
