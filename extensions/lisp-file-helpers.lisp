@@ -1,15 +1,14 @@
-;;;; -- Lisp file helpers for disposable workers --
-;;; Load by hand in each lisp.eval worker after it restarts
-;;; This file stays out of init.lisp's plugin list on purpose: it is a working
-;;; toolkit that grows with the work, not a startup plugin. Add helpers here
-;;; instead of retyping them per session.
-
+;;;; Lisp helpers for reading, slicing and splicing source files.
+;;;;
+;;;; init.lisp loads this file into the main image; lisp-helper-autoload.lisp
+;;;; loads it into every SBCL worker when the process starts.
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (unless (find-package :autolith)
     (make-package :autolith :use '(:cl))))
 
 (in-package #:autolith)
-(declaim (ftype function slice-lines brief-text form-count form-count-or-nil))
+(declaim (ftype function slice-lines brief-text form-count form-count-or-nil
+                     replace-range replaced-range))
 
 (defun split-lines (text)
   "Split TEXT at newlines, dropping the empty tail a final newline produces."
@@ -130,16 +129,7 @@ Return NIL when PATH holds no such definition."
 (defun splice-file-lines (path start end text)
   "Replace lines START through END (1-based, inclusive) in PATH with TEXT.
 Return the new line count. An empty TEXT deletes the range."
-  (let* ((lines (coerce (uiop:read-file-lines path) 'vector))
-         (count (length lines)))
-    (unless (<= 1 start end count)
-      (error "Range ~D-~D is outside 1..~D in ~A." start end count path))
-    (let ((updated (concatenate 'vector
-                                (subseq lines 0 (1- start))
-                                (coerce (split-lines text) 'vector)
-                                (subseq lines end))))
-      (write-lines path updated)
-      (length updated))))
+  (replace-range path start end (split-lines text)))
 
 (defun apply-splices (path splices)
   "Apply (START END HEAD-ANCHOR TAIL-ANCHOR LINE...) ranges to PATH.
@@ -170,10 +160,7 @@ range leaves PATH untouched and reports its range and error type."
         (let ((updated lines))
           (dolist (entry (sort prepared #'> :key #'first))
             (destructuring-bind (start end replacement) entry
-              (setf updated (concatenate 'vector
-                                         (subseq updated 0 (1- start))
-                                         (coerce replacement 'vector)
-                                         (subseq updated end)))))
+                (setf updated (replaced-range updated start end replacement))))
           (write-lines path updated)
           (list :applied (length prepared)
                 :line-count (length updated)
@@ -182,20 +169,22 @@ range leaves PATH untouched and reports its range and error type."
 
 (defun file-reads-completely-p (path)
   "Return true when every form in PATH reads without error."
-  (handler-case
-      (with-open-file (in path :direction :input)
-        (let ((*read-eval* nil))
-          (loop for form = (read in nil :eof)
-                until (eq form :eof)
-                finally (return t))))
-    (error () nil)))
+  (and (form-count-or-nil (uiop/stream:read-file-string path)) t))
+
+(defun replaced-range (lines start end replacement)
+  "Return LINES with its START..END (1-based, inclusive) replaced by REPLACEMENT."
+  (concatenate 'vector
+               (subseq lines 0 (1- start))
+               replacement
+               (subseq lines end)))
 
 (defun replace-range (path start end lines)
+  "Replace lines START through END of PATH with LINES; return the new line count."
   (let* ((content (uiop:read-file-lines path))
-         (updated (append (subseq content 0 (1- start))
-                          lines
-                          (subseq content end))))
-    (write-lines path updated)))
+         (count (length content)))
+    (unless (<= 1 start end count)
+      (error "Range ~D-~D is outside 1..~D in ~A." start end count path))
+    (write-lines path (replaced-range content start end lines))))
 
 (defun splice-range (path start end text)
   (let* ((lines (split-lines text)))
@@ -255,15 +244,7 @@ top-level forms once its delimiter balance matches its OLD's, and the result
 holds as many top-level forms as the original plus the deltas the replacements
 themselves imply, so callers never count forms.  A NEW whose delimiter balance
 differs from its OLD's is adjusted at its end and reported as :REPAIRED."
-  (labels ((count-forms (text)
-             (handler-case
-              (with-input-from-string (in text)
-                (let ((*read-eval* nil))
-                  (loop for form = (read in nil :eof)
-                        until (eq form :eof)
-                        count 1)))
-              (error nil nil)))
-           (paren-balance (text)
+    (labels ((paren-balance (text)
              "Return TEXT's net count of unclosed open delimiters."
              (let ((index 0) (limit (length text)) (balance 0))
                (flet ((skip-string ()
@@ -364,7 +345,9 @@ differs from its OLD's is adjusted at its end and reported as :REPAIRED."
              (list :applied 0 :failures
                    (list
                     (list :unbalanced (form-count-or-nil text) :expected
-                          (+ original delta)))))))))(defun form-count-or-nil (text)
+                          (+ original delta)))))))))
+
+(defun form-count-or-nil (text)
   "Return how many top-level forms TEXT holds, or NIL when they do not read."
   (handler-case (form-count text) (error () nil)))
 
