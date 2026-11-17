@@ -14,8 +14,8 @@
         "personal-instructions"
         "prompt-guard"
         "skill-catalog-compact"
-        lisp-file-helpers
-        lisp-helper-autoload
+        "lisp-file-helpers"
+        "lisp-helper-autoload"
         "always-selected-skills"
 	))
 
