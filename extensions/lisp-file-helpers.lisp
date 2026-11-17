@@ -184,6 +184,9 @@ range leaves PATH untouched and reports its range and error type."
          (count (length content)))
     (unless (<= 1 start end count)
       (error "Range ~D-~D is outside 1..~D in ~A." start end count path))
+    (when (and (member (pathname-type (pathname path)) '("lisp" "asd" "lsp" "cl") :test #'equalp)
+               (null (form-count-or-nil (join-lines (coerce (replaced-range (split-lines (uiop/stream:read-file-string path)) start end lines) 'list)))))
+      (error "Lines ~D-~D of ~A would leave it unreadable; nothing written." start end path))
     (write-lines path (replaced-range content start end lines))))
 
 (defun splice-range (path start end text)
@@ -370,3 +373,30 @@ edits need no escape characters. Write nothing unless every OLD is unique."
                             (list (join-lines (first pair))
                                   (join-lines (second pair))))
                           pairs)))
+
+
+(defun form-printed-lines (form)
+  (split-lines
+   (string-right-trim '(#\Newline)
+                      (with-output-to-string (stream)
+                        (let ((*print-pretty* t)
+                              (*print-case* :downcase)
+                              (*print-right-margin* 100))
+                          (pprint form stream))))))
+
+(defun insert-form-file (path after form)
+  (let* ((lines (split-lines (uiop/stream:read-file-string path)))
+         (index (multiple-value-bind (first second)
+                    (form-line-range path after)
+                  (if (consp first) (cadr first) second)))
+         (printed (append (form-printed-lines form) (list ""))))
+    (unless index (error "Form ~A not found in ~A." after path))
+    (replace-range path index index
+                  (append (list (nth (1- index) lines)) printed))))
+
+(defun replace-form-file (path name form)
+  (multiple-value-bind (first second) (form-line-range path name)
+    (let ((start (if (consp first) (car first) first))
+          (end (if (consp first) (cadr first) second)))
+      (unless (and start end) (error "Form ~A not found in ~A." name path))
+      (replace-range path start end (form-printed-lines form)))))
