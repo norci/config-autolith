@@ -3,7 +3,7 @@
 ;;;; -- Prompt Reminder Plugin --
 
 (defparameter *prompt-reminder-lines*
-  (list "make improvements to file ~/.config/autolith/extensions/lisp-file-helpers.lisp as needed"))
+  (list "use helper functions in ~/.config/autolith/extensions/lisp-file-helpers.lisp . make improvements to this file as needed"))
 
 (define-context-contributor lsp-reminder-context-contributor (request)
   (declare (ignore request))

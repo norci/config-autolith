@@ -400,3 +400,12 @@ edits need no escape characters. Write nothing unless every OLD is unique."
           (end (if (consp first) (cadr first) second)))
       (unless (and start end) (error "Form ~A not found in ~A." name path))
       (replace-range path start end (form-printed-lines form)))))
+
+(defun line-range (file start end)
+  "Return FILE lines START through END with their numbers."
+  (with-open-file (stream file)
+    (loop for number from 1
+          for line = (read-line stream nil)
+          while line
+          when (<= start number end)
+            collect (format nil "~D| ~A" number line))))
