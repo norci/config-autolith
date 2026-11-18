@@ -17,6 +17,15 @@
         "lisp-file-helpers"
         "lisp-helper-autoload"
         "always-selected-skills"
+        "session-skill"
 	))
 
-(setf *conversation-title-generation-output-tokens* 4096)
+(setf *conversation-title-generation-output-tokens*
+      4096)
+
+(setf dexador.util:*default-proxy*
+      nil)
+
+(setf *extra-skill-roots*
+      (list "~/code/agent-skills/common/"
+	    "~/code/superpowers/skills/"))
