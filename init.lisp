@@ -15,6 +15,7 @@
         "lisp-file-helpers"
         "lisp-helper-autoload"
         ;; "always-selected-skills"
+        "tool-call-interval"
         "session-skill"
 	))
 
