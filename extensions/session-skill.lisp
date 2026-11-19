@@ -3,10 +3,8 @@
 ;;;; -- Session-initial skill --
 
 (defparameter *session-skill-names* '("using-superpowers" "batch-processing" "correct-solution-first")
-  "Skill names whose complete bodies enter the first request of each conversation.")
+  "Skill names whose complete bodies enter the conversation as one anchored history block.")
 
-(defparameter *session-skill-injected* (make-hash-table :test #'equal)
-  "Conversation identifiers that already received the session-initial skill body.")
 
 (defun session-skill--metadata (configuration name)
   "Return catalog metadata named NAME under CONFIGURATION."
@@ -31,22 +29,25 @@
            (format stream "Skill ~A is absent from the current catalog, so its session-initial body could not be injected.~2%~%" name)))))))
 
 (define-context-contributor session-skill (request)
-  "Return the session-initial skill body once per conversation."
-  (unless (request-context-compaction-p request)
-    (let ((identifier (ignore-errors
-                        (conversation-identifier
-                         (request-context-conversation request)))))
-      (when (and identifier
-                 (plusp (length identifier))
-                 (not (gethash identifier *session-skill-injected*)))
-        (let ((instruction (session-skill--instruction
-                            (request-context-configuration request)
-                            *session-skill-names*)))
-          (setf (gethash identifier *session-skill-injected*) t)
-          (make-context-contribution
-           :identifier "session-skill"
-           :instruction instruction
-           :priority 915
-           :lifetime :turn
-           :class :mandatory
-           :deduplication-key "session-skill"))))))
+  "Return the session skill bodies as one anchored history block."
+  (let* ((configuration (request-context-configuration request))
+         (instruction   (session-skill--instruction configuration *session-skill-names*)))
+    (change-class
+     (make-context-contribution
+      :identifier        "session-skill"
+      :instruction       instruction
+      :priority          915
+      :class             ':mandatory
+      :deduplication-key "session-skill")
+     'anchored-context-contribution)))
+
+(define-context-contributor execution-discipline (request)
+  "Return the short execution rule that rides every request."
+  (declare (ignore request))
+  (make-context-contribution
+   :identifier "execution-discipline"
+   :instruction "技能里的流程是函数：加载后一次调用走完，不按文本步骤手工执行。编辑、验证、提交写进同一个程序；工具返回中间值时不为确认它再开一轮。"
+   :priority 950
+   :class ':mandatory
+   :lifetime :turn
+   :deduplication-key "execution-discipline"))
