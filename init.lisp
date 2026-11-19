@@ -9,14 +9,13 @@
 	"openrouter-routing"
         "billion-context"
         "lisp-ast-tools"
-        "lsp-reminder"
-        "personal-instructions"
-        "prompt-guard"
         "lisp-file-helpers"
         "lisp-helper-autoload"
-        ;; "always-selected-skills"
+        "reminder"
+        "personal-instructions"
         "tool-call-interval"
-        "session-skill"
+        ;; "always-selected-skills"
+        ;; "session-skill"
 	))
 
 (setf *conversation-title-generation-output-tokens*

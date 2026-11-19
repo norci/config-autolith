@@ -5,10 +5,10 @@
 (defparameter *prompt-reminder-lines*
   (list "use helper functions in ~/.config/autolith/extensions/lisp-file-helpers.lisp . make improvements to this file as needed"))
 
-(define-context-contributor lsp-reminder-context-contributor (request)
+(define-context-contributor reminder-context-contributor (request)
   (declare (ignore request))
   (make-context-contribution
-   :identifier "lsp-reminder-context-contributor"
+   :identifier "reminder-context-contributor"
    :class ':mandatory
    :priority 200
    :lifetime ':turn
