@@ -14,7 +14,7 @@
         "prompt-guard"
         "lisp-file-helpers"
         "lisp-helper-autoload"
-        "always-selected-skills"
+        ;; "always-selected-skills"
         "session-skill"
 	))
 

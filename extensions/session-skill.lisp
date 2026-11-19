@@ -2,32 +2,11 @@
 
 ;;;; -- Session-initial skill --
 
-(defparameter *session-skill-name* "using-superpowers"
-  "The skill whose complete body enters the first request of each conversation.")
+(defparameter *session-skill-names* '("using-superpowers" "batch-processing" "correct-solution-first")
+  "Skill names whose complete bodies enter the first request of each conversation.")
 
 (defparameter *session-skill-injected* (make-hash-table :test #'equal)
   "Conversation identifiers that already received the session-initial skill body.")
-
-(defun session-skill--read-text (pathname)
-  "Return PATHNAME complete text, or NIL when it cannot be read."
-  (handler-case
-      (with-open-file (stream pathname :element-type 'character)
-        (let ((text (make-string (file-length stream))))
-          (subseq text 0 (read-sequence text stream))))
-    (error () nil)))
-
-(defun session-skill--strip-frontmatter (text)
-  "Return TEXT without its leading YAML frontmatter block."
-  (let* ((newline (string (code-char 10)))
-         (marker (concatenate 'string newline "---"))
-         (opening (search "---" text)))
-    (if (and opening (zerop opening))
-        (let ((closing (search marker text :start2 (length marker))))
-          (if closing
-              (string-left-trim (list (code-char 10) (code-char 32))
-                                (subseq text (+ closing (length marker))))
-              text))
-        text)))
 
 (defun session-skill--metadata (configuration name)
   "Return catalog metadata named NAME under CONFIGURATION."
@@ -35,22 +14,21 @@
         (skill-catalog-skills (skill-catalog-for-configuration configuration))
         :test #'string= :key #'skill-metadata-name))
 
-(defun session-skill--body (configuration name)
-  "Return NAME instruction body, or NIL when the catalog cannot supply it."
-  (let ((metadata (session-skill--metadata configuration name)))
-    (when metadata
-      (let ((text (session-skill--read-text (skill-metadata-pathname metadata))))
-        (when text
-          (session-skill--strip-frontmatter text))))))
-
-(defun session-skill--first-p (identifier)
-  "Record IDENTIFIER and return true only for its first request in this process."
-  (when (and identifier (plusp (length identifier)))
-    (if (gethash identifier *session-skill-injected*)
-        nil
-        (progn
-          (setf (gethash identifier *session-skill-injected*) t)
-          t))))
+(defun session-skill--instruction (configuration names)
+  "Return the conversation-start instruction carrying the bodies of NAMES under CONFIGURATION."
+  (with-output-to-string (stream)
+    (dolist (name names)
+      (let* ((metadata (session-skill--metadata configuration name))
+             (body     (and metadata
+                            (handler-case (skill-metadata-read metadata)
+                              (error () nil)))))
+        (cond
+          (body
+           (format stream "Skill ~A is loaded at this conversation start. Its complete current instruction body follows and governs the rest of the conversation.~2%~A~2%~%" name body))
+          (metadata
+           (format stream "Skill ~A is present in the current catalog but its instruction body could not be read.~2%~%" name))
+          (t
+           (format stream "Skill ~A is absent from the current catalog, so its session-initial body could not be injected.~2%~%" name)))))))
 
 (define-context-contributor session-skill (request)
   "Return the session-initial skill body once per conversation."
@@ -58,17 +36,16 @@
     (let ((identifier (ignore-errors
                         (conversation-identifier
                          (request-context-conversation request)))))
-      (when (session-skill--first-p identifier)
-        (let* ((configuration (request-context-configuration request))
-               (body (session-skill--body configuration *session-skill-name*)))
+      (when (and identifier
+                 (plusp (length identifier))
+                 (not (gethash identifier *session-skill-injected*)))
+        (let ((instruction (session-skill--instruction
+                            (request-context-configuration request)
+                            *session-skill-names*)))
+          (setf (gethash identifier *session-skill-injected*) t)
           (make-context-contribution
            :identifier "session-skill"
-           :instruction
-           (if body
-               (format nil "Skill ~A is loaded at this conversation start. Its complete current instruction body follows and governs the rest of the conversation.~2%~A"
-                       *session-skill-name* body)
-               (format nil "Skill ~A is absent from the current catalog, so its session-initial body could not be injected."
-                       *session-skill-name*))
+           :instruction instruction
            :priority 915
            :lifetime :turn
            :class :mandatory
