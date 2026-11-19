@@ -21,6 +21,9 @@
 (setf *conversation-title-generation-output-tokens*
       4096)
 
+(setf *permissions-model-token-budget*
+      32768)
+
 (setf dexador.util:*default-proxy*
       nil)
 
