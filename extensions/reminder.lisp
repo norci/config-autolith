@@ -3,14 +3,14 @@
 ;;;; -- Prompt Reminder Plugin --
 
 (defparameter *prompt-reminder-lines*
-  (list "use helper functions in ~/.config/autolith/extensions/lisp-file-helpers.lisp . make improvements to this file as needed"))
+  (list "输出前逐句过闸。《金字塔原理》。写完整的短句。不写多重转折的长句。不用论文腔与装饰性文辞。"))
 
 (define-context-contributor reminder-context-contributor (request)
   (declare (ignore request))
   (make-context-contribution
    :identifier "reminder-context-contributor"
    :class ':mandatory
-   :priority 200
+   :priority 100
    :lifetime ':turn
    :instruction
    (format nil "<reminder>~{~&- ~A~%~}</reminder>" *prompt-reminder-lines*)))
