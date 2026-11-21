@@ -2,8 +2,15 @@
 
 ;;;; -- Always-selected skills --
 
-(defparameter *always-selected-skill-names* '("batch-processing" "correct-solution-first")
-  "Skill names whose complete instruction bodies enter every provider request.")
+(defparameter *always-selected-skill-names*
+  '(
+    "batch-processing"
+    "correct-solution-first"
+    )
+  "Skill names whose bodies enter requests gated by *ALWAYS-SELECTED-SKILL-INJECTION-MODE*.")
+
+(defparameter *always-selected-skill-injection-mode* ':user-prompt
+  "When always-selected bodies enter requests: :TURN every request, :USER-PROMPT only on a real user prompt.")
 
 (-> skill--always-selected-contributions (skill-catalog list) list)
 (-> skill--always-selected-contribution (skill-metadata) context-contribution)
@@ -49,54 +56,63 @@ by *SKILL-SELECTION-CHARACTER-LIMIT* counts selected skill instructions only."
                    (string= prefix identifier :end2 (length prefix)))
           (incf total
                 (length (context-contribution-instruction contribution))))))))
-(defun skill--always-selected-contributions (catalog contributions)
-  "Return CONTRIBUTIONS extended with the always-selected skill bodies from CATALOG.
+(-> skill--place-selected-contribution (skill-metadata list (integer 0)) (values list (integer 0)))
+(defun skill--place-selected-contribution (metadata contributions selected-characters)
+  "Return CONTRIBUTIONS and the character total after placing METADATA's body."
+  (let* ((contribution (skill--always-selected-contribution metadata))
+         (identifier   (context-contribution-identifier contribution))
+         (existing     (position identifier contributions
+                                 :key  #'context-contribution-identifier
+                                 :test #'string=))
+         (replaced     (and existing
+                            (context-contribution-instruction
+                             (nth existing contributions))))
+         (next-total   (+ selected-characters
+                          (if replaced (- (length replaced)) 0)
+                          (length (context-contribution-instruction contribution)))))
+    (cond
+      ((> next-total *skill-selection-character-limit*)
+       (values (append contributions
+                       (list
+                        (skill--warning-contribution
+                         metadata
+                         (format nil
+                                 "Skill ~A was selected but omitted because selected skill instructions exceed the ~D-character aggregate limit. Continue with the best fallback and report the omission."
+                                 (skill-metadata-name metadata)
+                                 *skill-selection-character-limit*))))
+               selected-characters))
+      (existing
+       (values (append (subseq contributions 0 existing)
+                       (list contribution)
+                       (nthcdr (1+ existing) contributions))
+               next-total))
+      (t
+       (values (append contributions (list contribution)) next-total)))))
 
-An identity an explicit selection already carries is replaced in place, so one
-request never holds two bodies for the same skill."
+(defun skill--always-selected-contributions (catalog contributions)
+  "Return CONTRIBUTIONS extended with the always-selected skill bodies from CATALOG."
   (let ((selected-characters
           (skill--selected-instruction-characters contributions)))
     (dolist (name *always-selected-skill-names* contributions)
       (let ((metadata (skill-catalog-find catalog name)))
-        (cond
-          ((null metadata)
-           (setf contributions
-                 (append contributions
-                         (list (skill--missing-selection-contribution name)))))
-          (t
-           (let* ((contribution (skill--always-selected-contribution metadata))
-                  (identifier   (context-contribution-identifier contribution))
-                  (existing     (position identifier contributions
-                                          :key  #'context-contribution-identifier
-                                          :test #'string=))
-                  (replaced     (and existing
-                                     (context-contribution-instruction
-                                      (nth existing contributions))))
-                  (next-total   (+ selected-characters
-                                   (if replaced (- (length replaced)) 0)
-                                   (length (context-contribution-instruction
-                                            contribution)))))
-             (cond
-               ((> next-total *skill-selection-character-limit*)
-                (setf contributions
-                      (append contributions
-                              (list
-                               (skill--warning-contribution
-                                metadata
-                                (format nil
-                                        "Skill ~A was selected but omitted because selected skill instructions exceed the ~D-character aggregate limit. Continue with the best fallback and report the omission."
-                                        (skill-metadata-name metadata)
-                                        *skill-selection-character-limit*))))))
-               (existing
-                (setf contributions
-                      (append (subseq contributions 0 existing)
-                              (list contribution)
-                              (nthcdr (1+ existing) contributions)))
-                (setf selected-characters next-total))
-               (t
-                (setf contributions
-                      (append contributions (list contribution)))
-                (setf selected-characters next-total))))))))))
+        (if metadata
+            (multiple-value-bind (extended total)
+                (skill--place-selected-contribution
+                 metadata contributions selected-characters)
+              (setf contributions extended
+                    selected-characters total))
+            (setf contributions
+                  (append contributions
+                          (list (skill--missing-selection-contribution name)))))))))
+
+(-> skill--user-prompt-p (conversation) boolean)
+(defun skill--user-prompt-p (conversation)
+  "True when CONVERSATION's newest durable user message is a real prompt."
+  (let ((record (first (conversation-records-newest conversation 1))))
+    (and (consp record)
+         (eq (first record) ':message)
+         (eq (getf (rest record) ':role) ':user)
+         (not (getf (rest record) ':automatic-p)))))
 
 (-> skill-request-contributions (configuration conversation) list)
 (defun skill-request-contributions (configuration conversation)
@@ -104,4 +120,7 @@ request never holds two bodies for the same skill."
   (let* ((catalog  (skill-catalog-for-configuration configuration))
          (selected (skill--request-contributions-for-catalog catalog conversation)))
     (skill--bound-warning-contributions
-     (skill--always-selected-contributions catalog selected))))
+     (if (and (eq *always-selected-skill-injection-mode* ':user-prompt)
+              (not (skill--user-prompt-p conversation)))
+         selected
+          (skill--always-selected-contributions catalog selected)))))
