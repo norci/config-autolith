@@ -696,6 +696,26 @@ leaves the estimate alone."
       nil
       (call-next-method)))
 
+(defmethod provider-request-input-token-estimate :around
+    ((provider model-provider) (request hash-table))
+  "Report the proxy's measured wire size instead of summing folded history.
+
+  While the proxy owns the conversation and its wire has headroom, local
+  admission must judge the request by the reading the proxy actually sends.
+  The stored-history sum counts content the fold removed and can refuse a
+  request that fits. Once the wire is full the proxy no longer replaces
+  compaction, so defer to Autolith's own estimate and let the native path
+  measure compaction candidates."
+  (let ((conversation (and *provider-context-request*
+                           (getf *provider-context-request* :conversation))))
+    (if (and conversation (bili-suppresses-compaction-p conversation))
+        (multiple-value-bind (tokens limit) (bili--wire-usage conversation)
+          (declare (ignore limit))
+          (if tokens
+              (values tokens nil)
+              (call-next-method)))
+        (call-next-method))))
+
 (defvar *bili-native-compact-wrapper* nil
   "The exact wrapper this file installed on AGENT-COMPACT-CONVERSATION.")
 
