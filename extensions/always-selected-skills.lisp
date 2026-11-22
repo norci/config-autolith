@@ -4,7 +4,9 @@
 
 (defparameter *always-selected-skill-names*
   '("batch-processing"
-    "correct-solution-first")
+    "correct-solution-first"
+    "ponytail"
+    )
   "Skill names whose bodies enter requests gated by *ALWAYS-SELECTED-SKILL-INJECTION-MODE*.")
 
 (defparameter *always-selected-skill-injection-mode* ':user-prompt

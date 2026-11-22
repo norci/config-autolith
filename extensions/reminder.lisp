@@ -4,7 +4,8 @@
 
 (defparameter *prompt-reminder-lines*
   (list "输出前逐句过闸。《金字塔原理》。写完整的短句。不写多重转折的长句。不用论文腔与装饰性文辞。"
-	"Must use agent-lsp tools for coding. skill.load agent-lsp-navigation in first turn. forbid read lots of code then wire by hand."
+	"Must use skill agent-lsp-navigation for coding. forbid wire code by hand."
+	"must use skill batch-processing. forbid split tool calls into multiple turns"
 	))
 
 (define-context-contributor reminder-context-contributor (request)

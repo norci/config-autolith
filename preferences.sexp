@@ -1,5 +1,4 @@
-(:PREFERENCES :VERSION 8 :PROMPT-CACHE-TTL :|1H| :SIMPLE-TECHNICAL-ENGLISH-P
- NIL :CHILD-MODEL-ALIASES
+(:PREFERENCES :VERSION 8 :PROMPT-CACHE-TTL :|1H| :CHILD-MODEL-ALIASES
  (("@smol" "openrouter/tencent/hy4-flash")
   ("@designer" "openrouter/tencent/hy4-flash")
   ("@slow" "openrouter/tencent/hy4-flash"))
@@ -7,6 +6,6 @@
  ("~/code/agent-skills/common/" "~/code/agent-skills/autolith/"
   "~/code/superpowers/skills/")
  :TRANSCRIPT-STYLE :REPL :PERMISSION-MODE :ASK :TURN-TIMESTAMPS-P T
- :REASONING-TRACES-P NIL :REASONING-EFFORT #A((5) BASE-CHAR . "xhigh") :MODEL
+ :REASONING-TRACES-P NIL :REASONING-EFFORT "max" :MODEL
  "openrouter/tencent/hy4-flash" :MODEL-PROVIDER "openrouter" :FULLSCREEN-P T
  :TERMINAL-THEME :AUTOLITH)
