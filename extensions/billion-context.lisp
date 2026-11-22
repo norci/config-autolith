@@ -606,22 +606,27 @@ window, and then names every compressible range so the agent folds them at once.
 
 ;;;; -- Compaction interception --
 
+(-> bili--headroom-tokens (conversation) (option integer))
+(defun bili--headroom-tokens (conversation)
+  "Return the proxy's wire token reading for CONVERSATION while it has headroom.
+
+  Read the live status directly. The source label separates provider usage from
+  host recomputation, but both bound the folded wire. Below the reserve the
+  proxy keeps the request inside the window, so one reading serves admission
+  and native-compaction suppression alike."
+  (when (or *bili-active-p* (bili--activate-proxy))
+    (let ((status (bili--live-status conversation)))
+      (when status
+        (let ((tokens (gethash "contextTokens" status))
+              (limit  (gethash "contextLimit" status)))
+          (when (and (integerp tokens) (integerp limit) (plusp limit)
+                     (< tokens (* *bili-compaction-reserve-share* limit)))
+            tokens))))))
+
 (-> bili-suppresses-compaction-p (conversation) boolean)
 (defun bili-suppresses-compaction-p (conversation)
-  "Return true while the proxy owns CONVERSATION and its wire has headroom.
-
-Read the live status directly. The source label separates provider usage from
-host recomputation for the compression prompt and sample adoption, but either
-reading bounds the folded wire. Autolith's stored-history estimate counts
-content the fold removed, so a stable own status is the right basis for
-suppressing native compaction. The 0.95 reserve keeps an emergency exit."
-  (and (or *bili-active-p* (bili--activate-proxy))
-       (let ((status (bili--live-status conversation)))
-         (when status
-           (let ((tokens (gethash "contextTokens" status))
-                 (limit  (gethash "contextLimit" status)))
-             (and (integerp tokens) (integerp limit) (plusp limit)
-                  (< tokens (* *bili-compaction-reserve-share* limit))))))))
+  "Return true while the proxy owns CONVERSATION and its wire has headroom."
+  (and (bili--headroom-tokens conversation) t))
 (-> bili--context-usage-sample (conversation t t integer) (option list))
 (defun bili--context-usage-sample (conversation provider registry tokens)
   "Return format-two context evidence reporting TOKENS for one request.
@@ -698,22 +703,20 @@ leaves the estimate alone."
 
 (defmethod provider-request-input-token-estimate :around
     ((provider model-provider) (request hash-table))
-  "Report the proxy's measured wire size instead of summing folded history.
+  "Report the proxy's wire reading instead of summing folded history.
 
   While the proxy owns the conversation and its wire has headroom, local
   admission must judge the request by the reading the proxy actually sends.
-  The stored-history sum counts content the fold removed and can refuse a
-  request that fits. Once the wire is full the proxy no longer replaces
-  compaction, so defer to Autolith's own estimate and let the native path
-  measure compaction candidates."
-  (let ((conversation (and *provider-context-request*
-                           (getf *provider-context-request* :conversation))))
-    (if (and conversation (bili-suppresses-compaction-p conversation))
-        (multiple-value-bind (tokens limit) (bili--wire-usage conversation)
-          (declare (ignore limit))
-          (if tokens
-              (values tokens nil)
-              (call-next-method)))
+  Both provider usage and host recomputation bound the folded wire, so either
+  source is safe here. The stored-history sum counts content the fold removed
+  and can refuse a request that fits. Once the wire is full the proxy no longer
+  replaces compaction, so defer to Autolith's own estimate and let the native
+  path measure compaction candidates."
+  (let* ((conversation (and *provider-context-request*
+                            (getf *provider-context-request* :conversation)))
+         (tokens (and conversation (bili--headroom-tokens conversation))))
+    (if tokens
+        (values tokens nil)
         (call-next-method))))
 
 (defvar *bili-native-compact-wrapper* nil
