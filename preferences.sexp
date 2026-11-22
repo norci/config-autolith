@@ -1,5 +1,5 @@
-(:PREFERENCES :VERSION 8 :PROMPT-CACHE-TTL :|1H| :SIMPLE-TECHNICAL-ENGLISH-P T
- :CHILD-MODEL-ALIASES
+(:PREFERENCES :VERSION 8 :PROMPT-CACHE-TTL :|1H| :SIMPLE-TECHNICAL-ENGLISH-P
+ NIL :CHILD-MODEL-ALIASES
  (("@smol" "openrouter/tencent/hy4-flash")
   ("@designer" "openrouter/tencent/hy4-flash")
   ("@slow" "openrouter/tencent/hy4-flash"))
