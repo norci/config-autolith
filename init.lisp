@@ -14,6 +14,7 @@
         "reminder"
         "personal-instructions"
         "always-selected-skills"
+          "web-search"
 	))
 
 (setf *conversation-title-generation-output-tokens* 4096)
