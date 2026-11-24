@@ -1,10 +1,10 @@
 ;;;; -- Lisp AST Tools --
 
-;;; Read, search and edit Common Lisp source files as top-level forms instead of line
-;;; windows. The scanner is a self-contained character-level reader that never
-;;; interns or evaluates a form; it only locates balanced form spans so an edit
-;;; can replace, insert before, or insert after one top-level form while the
-;;; rest of the file stays byte for byte identical.
+;;; Read, search and edit Common Lisp and Hy source files as top-level forms
+;;; instead of line windows. The scanner is a self-contained character-level
+;;; reader that never interns or evaluates a form; it only locates balanced
+;;; form spans so an edit can replace, insert before, or insert after one
+;;; top-level form while the rest of the file stays byte for byte identical.
 
 (in-package #:autolith)
 
@@ -23,7 +23,42 @@
   "Maximum number of candidate forms listed in a failure message.")
 
 
+(defvar *lisp-ast-dialect* :common-lisp
+  "Reader dialect the scanner applies: :COMMON-LISP or :HY.")
+
+(defun lisp-ast--dialect-for-path (path)
+  "Return the reader dialect for PATH's source type."
+  (if (string-equal (pathname-type (pathname path)) "hy")
+      :hy
+      :common-lisp))
+
+(defun lisp-ast--hy-p ()
+  "Return T when the scanner is reading Hy source."
+  (eq *lisp-ast-dialect* :hy))
+
+(-> lisp-ast--hy-opener-p (character) boolean)
+(defun lisp-ast--hy-opener-p (character)
+  "Return T when CHARACTER opens a Hy-only collection form."
+  (and (lisp-ast--hy-p) (not (null (find character "[{" :test #'char=)))))
+
+(-> lisp-ast--hy-closer-p (character) boolean)
+(defun lisp-ast--hy-closer-p (character)
+  "Return T when CHARACTER closes a Hy-only collection form."
+  (and (lisp-ast--hy-p) (not (null (find character "]}" :test #'char=)))))
+
+(eval-when (:load-toplevel :execute)
+  (pushnew "hy" parenchek:*lisp-source-balance-clojure-pathname-types*
+           :test #'string=))
+
 ;;; -- Scanner --
+(defmacro lisp-ast--defscan (name lambda-list &key doc with definitions call)
+  "Define a character scanner with LIMIT and optional WITH bindings.
+DEFINITIONS supplies the local recursive functions; CALL starts the scan."
+  `(defun ,name ,lambda-list
+     ,@(when doc (list doc))
+     (let* ((limit (length ,(first lambda-list))) ,@with)
+       (labels ,definitions
+         ,call))))
 
 (-> lisp-ast--whitespace-p (character) boolean)
 (defun lisp-ast--whitespace-p (character)
@@ -37,197 +72,276 @@
   (or (position #\newline text :start index) (length text)))
 
 (-> lisp-ast--skip-block-comment ((vector character) (integer 0)) (integer 0))
-(defun lisp-ast--skip-block-comment (text index)
-  "Skip one nested #| block comment; INDEX points at its opening #."
-  (let ((depth 1)
-        (i (+ index 2)))
-    (or (loop while (< i (length text))
-          do (cond
-               ((and (char= (char text i) #\#)
-                     (< (1+ i) (length text))
-                     (char= (char text (1+ i)) #\|))
-                (incf depth)
-                (incf i 2))
-               ((and (char= (char text i) #\|)
-                     (< (1+ i) (length text))
-                     (char= (char text (1+ i)) #\#))
-                (decf depth)
-                (incf i 2)
-                (when (zerop depth)
-                  (return i)))
-               (t (incf i))))
-    (length text))))
+(lisp-ast--defscan lisp-ast--skip-block-comment (text index)
+  :doc "Skip one nested #| block comment; INDEX points at its #."
+  :definitions
+      ((scan (i depth)
+         (cond
+           ((>= i limit) limit)
+           ((and (< (1+ i) limit)
+                 (char= (char text i) #\|)
+                 (char= (char text (1+ i)) #\#))
+            (if (= depth 1)
+                i
+                (scan (+ i 2) (1- depth))))
+           ((and (< (1+ i) limit)
+                 (char= (char text i) #\#)
+                 (char= (char text (1+ i)) #\|))
+            (scan (+ i 2) (1+ depth)))
+           (t (scan (1+ i) depth)))))
+  :call (scan (+ index 2) 1))
 
 (-> lisp-ast--skip-atmosphere ((vector character) (integer 0)) (integer 0))
-(defun lisp-ast--skip-atmosphere (text index)
-  "Return the next non-whitespace, non-comment index at or after INDEX."
-  (let ((i index))
-    (loop
-      (when (>= i (length text))
-        (return i))
-      (cond
-        ((lisp-ast--whitespace-p (char text i))
-         (incf i))
-        ((char= (char text i) #\;)
-         (setf i (lisp-ast--skip-line-comment text i)))
-        ((and (char= (char text i) #\#)
-              (< (1+ i) (length text))
-              (char= (char text (1+ i)) #\|))
-         (setf i (lisp-ast--skip-block-comment text i)))
-        (t
-         (return i))))))
+(lisp-ast--defscan lisp-ast--skip-atmosphere (text index)
+  :doc "Return the next non-whitespace, non-comment index at or after INDEX."
+  :definitions
+      ((scan (i)
+         (cond
+           ((>= i limit) i)
+           ((lisp-ast--whitespace-p (char text i)) (scan (1+ i)))
+           ((char= (char text i) #\;) (scan (lisp-ast--skip-line-comment text i)))
+           ((and (< (1+ i) limit)
+                 (char= (char text i) #\#)
+                 (char= (char text (1+ i)) #\|))
+            (scan (lisp-ast--skip-block-comment text i)))
+           (t i))))
+  :call (scan index))
 
-(-> lisp-ast--skip-string ((vector character) (integer 0)) (values (integer 0) boolean))
-(defun lisp-ast--skip-string (text index)
-  "Return the index past the closing quote of the string starting at INDEX.
+  (-> lisp-ast--triple-quote-p ((vector character) (integer 0)) boolean)
+  (defun lisp-ast--triple-quote-p (text index)
+    "Return T when INDEX starts a Hy triple quote."
+    (and (< (+ index 2) (length text))
+         (char= (char text (1+ index)) #\")
+         (char= (char text (+ index 2)) #\")))
 
-The second value is NIL when the text ends before the closing quote."
-  (let ((limit (length text))
-        (i (1+ index)))
-    (loop while (< i limit)
-          do (let ((c (char text i)))
-               (cond
-                 ((char= c #\\)
-                  (incf i 2))
-                 ((char= c #\")
-                  (return-from lisp-ast--skip-string (values (1+ i) t)))
-                 (t
-                  (incf i)))))
-    (values limit nil)))
+(-> lisp-ast--quoted-end ((vector character) (integer 0) boolean boolean)
+    (values (integer 0) boolean))
+(lisp-ast--defscan lisp-ast--quoted-end (text index formatted-p triple-p)
+  :doc "Return the end of the string whose quote is at INDEX."
+  :definitions
+      ((quoted (i depth)
+         (cond
+           ((>= i limit) (values limit nil))
+           ((and (< (+ i 2) limit)
+                 (char= (char text i) #\")
+                 (char= (char text (1+ i)) #\")
+                 (char= (char text (+ i 2)) #\"))
+            (if (and triple-p (zerop depth))
+                (values (+ i 3) t)
+                (quoted (+ i 3) depth)))
+           ((char= (char text i) #\\) (quoted (min limit (+ i 2)) depth))
+           (formatted-p
+            (cond
+              ((char= (char text i) #\{) (field (1+ i) (1+ depth)))
+              ((char= (char text i) #\}) (quoted (1+ i) depth))
+              ((char= (char text i) #\") (values (1+ i) t))
+              (t (quoted (1+ i) depth))))
+           ((char= (char text i) #\") (values (1+ i) t))
+           (t (quoted (1+ i) depth))))
+       (field (i depth)
+         (cond
+           ((>= i limit) (values limit nil))
+           ((char= (char text i) #\\) (field (min limit (+ i 2)) depth))
+           ((char= (char text i) #\;) (field (lisp-ast--skip-line-comment text i) depth))
+           ((char= (char text i) #\{) (field (1+ i) (1+ depth)))
+           ((char= (char text i) #\})
+            (if (= depth 1)
+                (quoted (1+ i) 0)
+                (field (1+ i) (1- depth))))
+           ((char= (char text i) #\")
+            (multiple-value-bind (end complete-p)
+                (lisp-ast--quoted-end text i nil nil)
+              (if complete-p (field end depth) (values end nil))))
+           (t
+            (multiple-value-bind (quote inner-formatted-p)
+                (lisp-ast--string-prefix-end text i)
+              (if quote
+                  (multiple-value-bind (end complete-p)
+                      (lisp-ast--quoted-end text quote inner-formatted-p
+                                            (lisp-ast--triple-quote-p text quote))
+                    (if complete-p (field end depth) (values end nil)))
+                  (field (1+ i) depth)))))))
+  :call (quoted (+ index (if triple-p 3 1)) 0))
+
+  (-> lisp-ast--skip-string ((vector character) (integer 0)) (values (integer 0) boolean))
+  (defun lisp-ast--skip-string (text index)
+    "Return the index past the string starting at INDEX."
+    (lisp-ast--quoted-end text index nil (lisp-ast--triple-quote-p text index)))
+
+  (-> lisp-ast--string-prefix-end ((vector character) (integer 0))
+      (values (option (integer 0)) boolean))
+  (defun lisp-ast--string-prefix-end (text index)
+    "Return the quote index and FORMATTED-P for a Hy string prefix at INDEX."
+    (let ((limit (length text))
+          (i index)
+          (formatted-p nil))
+      (when (and (< i limit) (find (char text i) "rbft" :test #'char=))
+        (setf formatted-p (not (null (find (char text i) "ft" :test #'char=))))
+        (incf i)
+        (when (and (< i limit) (find (char text i) "rbft" :test #'char=))
+          (setf formatted-p
+                (or formatted-p (not (null (find (char text i) "ft" :test #'char=)))))
+          (incf i))
+        (when (and (< i limit) (char= (char text i) #\"))
+          (values i formatted-p)))))
+
+  (-> lisp-ast--skip-prefixed-string
+      ((vector character) (integer 0) (integer 0) boolean) (values (integer 0) boolean))
+  (defun lisp-ast--skip-prefixed-string (text index quote-index formatted-p)
+    "Skip the prefixed Hy string whose prefix starts at INDEX."
+    (declare (ignore index))
+    (lisp-ast--quoted-end text quote-index formatted-p
+                          (lisp-ast--triple-quote-p text quote-index)))
+
+  (-> lisp-ast--prefixed-string-end ((vector character) (integer 0))
+      (values (option (integer 0)) boolean))
+  (defun lisp-ast--prefixed-string-end (text index)
+    "Return the end of a Hy prefixed string starting at INDEX, if any."
+    (when (lisp-ast--hy-p)
+      (multiple-value-bind (quote formatted-p)
+          (lisp-ast--string-prefix-end text index)
+        (when quote
+          (lisp-ast--skip-prefixed-string text index quote formatted-p)))))
 
 (-> lisp-ast--skip-character-literal ((vector character) (integer 0)) (values (integer 0) boolean))
-(defun lisp-ast--skip-character-literal (text index)
-  "Skip one #\\ character literal; INDEX points at its #.
-
-A literal is either a single character or an alphanumeric name, so the
-element ends after that character or after the name. The second value is
-NIL when the text ends right after #\\."
-  (let ((i (+ index 2))
-        (limit (length text)))
-    (cond
-      ((>= i limit)
-       (values limit nil))
-      ((alphanumericp (char text i))
-       (loop while (< i limit)
-             while (alphanumericp (char text i))
-             do (incf i))
-       (values i t))
-      (t
-       (values (min limit (1+ i)) t)))))
+(lisp-ast--defscan lisp-ast--skip-character-literal (text index)
+  :doc "Skip one #\\ character literal; INDEX points at its #."
+  :with ((i (+ index 2)))
+  :definitions
+      ((scan (j)
+         (if (and (< j limit) (alphanumericp (char text j)))
+             (scan (1+ j))
+             j)))
+  :call (cond
+          ((>= i limit) (values limit nil))
+          ((alphanumericp (char text i)) (values (scan i) t))
+          (t (values (min limit (1+ i)) t))))
 
 (-> lisp-ast--token-end ((vector character) (integer 0)) (values (integer 0) boolean))
-(defun lisp-ast--token-end (text index)
-  "Return the end of the token starting at INDEX.
-
-Stops at whitespace, list delimiters, quotes, and string starters; honors
-backslash escapes and |multiple-escape| bars. The second value is NIL when
-a bar escape or a backslash runs past the end of the text."
-  (let ((limit (length text))
-        (i index)
-        (complete-p t))
-    (loop while (< i limit)
-          do (let ((c (char text i)))
+(lisp-ast--defscan lisp-ast--token-end (text index)
+  :doc "Return the end of the token starting at INDEX."
+  :with ((delimiters (if (lisp-ast--hy-p)
+                           "()[]{}\";'`~,"
+                           "()\";'`,`")))
+  :definitions
+      ((scan (i complete-p)
+         (if (>= i limit)
+             (values i complete-p)
+             (let ((c (char text i)))
                (cond
                  ((char= c #\\)
                   (if (<= (+ i 2) limit)
-                      (incf i 2)
-                      (setf i limit complete-p nil)))
+                      (scan (+ i 2) complete-p)
+                      (values limit nil)))
                  ((char= c #\|)
                   (let ((close (position #\| text :start (1+ i))))
                     (if close
-                        (setf i (1+ close))
-                        (setf i limit complete-p nil))))
+                        (scan (1+ close) complete-p)
+                        (values limit nil))))
                  ((or (lisp-ast--whitespace-p c)
-                      (find c "()\";'`," :test #'char=))
-                  (return))
-                 (t (incf i)))))
-    (values i complete-p)))
+                      (find c delimiters :test #'char=))
+                  (values i complete-p))
+                 (t (scan (1+ i) complete-p)))))))
+  :call (scan index t))
+
+  (defun lisp-ast--closing-delimiter (character)
+    "Return the delimiter closing an opener CHARACTER."
+    (case character
+      (#\( #\))
+      (#\[ #\])
+      (#\{ #\})
+      (otherwise #\))))
 
 (-> lisp-ast--form-end ((vector character) (integer 0)) (values (integer 0) boolean))
-(defun lisp-ast--form-end (text index)
-  "Return the index just past the closing paren of the list starting at INDEX.
-
-The second value is NIL when the text ends before that paren."
-  (let ((limit (length text))
-        (depth 1)
-        (i (1+ index)))
-    (loop
-      (setf i (lisp-ast--skip-atmosphere text i))
-      (when (>= i limit)
-        (return (values limit nil)))
-      (let ((c (char text i)))
-        (cond
-          ((char= c #\()
-           (incf depth)
-           (incf i))
-          ((char= c #\))
-           (decf depth)
-           (incf i)
-           (when (zerop depth)
-             (return (values i t))))
-          (t
-           (let ((element-end (lisp-ast--element-end text i)))
-             (unless (> element-end i)
-               (error "lisp-ast scanner stalled at character ~D (~S) of ~D."
-                      i (char text i) limit))
-             (setf i element-end))))))))
+(lisp-ast--defscan lisp-ast--form-end (text index)
+  :doc "Return the index just past the balanced form starting at INDEX."
+  :with ((closer (lisp-ast--closing-delimiter (char text index))))
+  :definitions
+      ((scan (i stack)
+         (let ((i (lisp-ast--skip-atmosphere text i)))
+           (cond
+             ((>= i limit) (values limit nil))
+             ((or (char= (char text i) #\()
+                  (lisp-ast--hy-opener-p (char text i)))
+              (scan (1+ i)
+                    (cons (lisp-ast--closing-delimiter (char text i)) stack)))
+             ((or (char= (char text i) #\))
+                  (lisp-ast--hy-closer-p (char text i)))
+              (if (char= (char text i) (car stack))
+                  (if (null (cdr stack))
+                      (values (1+ i) t)
+                      (scan (1+ i) (cdr stack)))
+                  (values i nil)))
+             (t
+              (multiple-value-bind (end complete-p)
+                  (lisp-ast--element-end text i)
+                (if (and complete-p (> end i))
+                    (scan end stack)
+                    (values end complete-p))))))))
+  :call (scan (1+ index) (list closer)))
 
 (-> lisp-ast--element-end ((vector character) (integer 0)) (values (integer 0) boolean))
-(defun lisp-ast--element-end (text index)
-  "Return the index just past the form element starting at INDEX.
-
-The second value is NIL when the element runs out of text before it is
-complete, for example an unterminated list or string. A #+/#- reader
-conditional and the form it guards count as one element."
-  (let ((limit (length text))
-        (i index))
-    (loop
-      (when (>= i limit)
-        (return (values limit nil)))
-      (let ((c (char text i)))
-        (cond
-          ((char= c #\()
-           (return (lisp-ast--form-end text i)))
-          ((char= c #\")
-           (return (lisp-ast--skip-string text i)))
-          ((char= c #\;)
-           (return (values (lisp-ast--skip-line-comment text i) t)))
-          ((and (char= c #\#)
-                (< (1+ i) limit)
-                (char= (char text (1+ i)) #\\))
-           (return (lisp-ast--skip-character-literal text i)))
-          ((and (char= c #\#)
-                (< (1+ i) limit)
-                (char= (char text (1+ i)) #\'))
-           (incf i 2))
-          ((and (char= c #\#)
-                (< (1+ i) limit)
-                (find (char text (1+ i)) "+-" :test #'char=))
-           (setf i (lisp-ast--skip-atmosphere text (+ i 2)))
-           (when (>= i limit)
-             (return (values limit nil)))
-           (setf i (lisp-ast--element-end text i))
-           (when (>= i limit)
-             (return (values limit nil)))
-           (setf i (lisp-ast--skip-atmosphere text i))
-           (return (if (>= i limit)
-                       (values limit nil)
-                       (lisp-ast--element-end text i))))
-          ((char= c #\#)
-           (incf i)
-           (loop while (< i limit)
-                 while (or (digit-char-p (char text i))
-                           (find (char text i) "+-.:" :test #'char=))
-                 do (incf i))
-           (if (and (< i limit) (char= (char text i) #\())
-               (return (lisp-ast--form-end text i))
-               (return (lisp-ast--element-end text i))))
-          ((find c "'`," :test #'char=)
-           (incf i)
-           (when (and (< i limit) (char= (char text i) #\@))
-             (incf i)))
-          (t
-           (return (lisp-ast--token-end text i))))))))
+(lisp-ast--defscan lisp-ast--element-end (text index)
+  :doc "Return the end of one balanced form element starting at INDEX."
+  :definitions
+      ((tag-char-p (c)
+         (or (alphanumericp c) (find c "_!?-+*" :test #'char=)))
+       (scan-tag (i)
+         (if (and (< i limit) (tag-char-p (char text i)))
+             (scan-tag (1+ i))
+             i))
+       (scan-modifier (i)
+         (if (and (< i limit)
+                  (or (digit-char-p (char text i))
+                      (find (char text i) "+-.:\"" :test #'char=)))
+             (scan-modifier (1+ i))
+             i))
+       (sharp (i)
+         (let ((next (1+ i)))
+           (cond
+             ((>= next limit) (values limit nil))
+             ((char= (char text next) #\\)
+              (lisp-ast--skip-character-literal text i))
+             ((char= (char text next) #\|)
+              (values (lisp-ast--skip-block-comment text i) t))
+             ((char= (char text next) #\') (values (min limit (+ i 2)) t))
+             ((find (char text next) "+-" :test #'char=)
+              (let ((first (lisp-ast--skip-atmosphere text (+ i 2))))
+                (if (>= first limit)
+                    (values limit nil)
+                    (multiple-value-bind (first-end first-ok) (scan first)
+                      (if first-ok
+                          (let ((second (lisp-ast--skip-atmosphere text first-end)))
+                            (if (>= second limit)
+                                (values limit nil)
+                                (scan second)))
+                          (values first-end nil))))))
+             ((and (lisp-ast--hy-p) (tag-char-p (char text next)))
+              (scan (scan-tag next)))
+             (t (scan (scan-modifier next))))))
+       (scan (i)
+         (cond
+           ((>= i limit) (values limit nil))
+           (t
+            (let ((c (char text i)))
+              (cond
+                ((and (lisp-ast--hy-p)
+                      (lisp-ast--string-prefix-end text i))
+                 (multiple-value-bind (quote formatted-p)
+                     (lisp-ast--string-prefix-end text i)
+                   (lisp-ast--skip-prefixed-string text i quote formatted-p)))
+                ((or (char= c #\() (lisp-ast--hy-opener-p c))
+                 (lisp-ast--form-end text i))
+                ((char= c #\") (lisp-ast--skip-string text i))
+                ((char= c #\;) (values (lisp-ast--skip-line-comment text i) t))
+                ((char= c #\#) (sharp i))
+                ((find c "'`," :test #'char=)
+                 (scan (if (and (< (1+ i) limit)
+                                (char= (char text (1+ i)) #\@))
+                           (+ i 2)
+                           (1+ i))))
+                (t (lisp-ast--token-end text i))))))))
+  :call (scan index))
 
 
 ;;; -- Located Forms --
@@ -249,14 +363,10 @@ conditional and the form it guards count as one element."
          (colon (position #\: text :from-end t)))
     (subseq text (if colon (1+ colon) 0))))
 
-(-> lisp-ast--list-form-start ((vector character) (integer 0) (integer 0))
-    (option (integer 0)))
-
 (defun lisp-ast--list-form-start (text start end)
-  "Return the index of the list form that reader conditionals at START guard.
+  "Return the index of the list form that reader tags or conditionals guard.
 
-NIL means START is neither a list form nor a chain of #+/#- conditionals
-ending in one."
+  NIL means START is neither a list form nor a chain of prefixes ending in one."
   (let ((i start)
         (limit (min end (length text))))
     (loop
@@ -265,7 +375,8 @@ ending in one."
         (return nil))
       (let ((c (char text i)))
         (cond
-          ((char= c #\()
+          ((or (char= c #\()
+                 (lisp-ast--hy-opener-p c))
            (return i))
           ((and (char= c #\#)
                 (< (1+ i) limit)
@@ -274,6 +385,16 @@ ending in one."
            (when (>= i limit)
              (return nil))
            (setf i (lisp-ast--element-end text i)))
+          ((and (lisp-ast--hy-p)
+                (char= c #\#)
+                (< (1+ i) limit)
+                (or (alphanumericp (char text (1+ i)))
+                    (find (char text (1+ i)) "_!?-+*" :test #'char=)))
+           (incf i)
+           (loop while (and (< i limit)
+                            (or (alphanumericp (char text i))
+                                (find (char text i) "_!?-+*" :test #'char=)))
+                 do (incf i)))
           (t
            (return nil)))))))
 
@@ -312,7 +433,8 @@ of the guarded list form."
           (setf i (lisp-ast--skip-atmosphere text i))
           (when (< i end)
             (cond
-              ((char= (char text i) #\()
+                  ((or (char= (char text i) #\()
+                       (lisp-ast--hy-opener-p (char text i)))
                (let* ((inner-end (lisp-ast--form-end text i))
                       (inner-head (lisp-ast--form-head text i inner-end)))
                  (cond
@@ -769,15 +891,15 @@ closes, or text after the single form."
 
 (defclass lisp-ast-search-tool (lisp-ast-tool)
   ()
-  (:documentation "Search a Common Lisp source file by form structure."))
+  (:documentation "Search a Lisp-family source file by form structure."))
 
 (defclass lisp-ast-read-tool (lisp-ast-tool)
   ()
-  (:documentation "Report a Common Lisp source file's top-level forms."))
+  (:documentation "Report a Lisp-family source file's top-level forms."))
 
 (defclass lisp-ast-edit-tool (lisp-ast-tool)
   ()
-  (:documentation "Edit one top-level form of a Common Lisp source file."))
+  (:documentation "Edit one top-level form of a Lisp-family source file."))
 
 (defmethod tool-execution-policy ((tool lisp-ast-edit-tool))
   "Serialize edits so concurrent reads observe one committed result."
@@ -787,18 +909,21 @@ closes, or text after the single form."
   "Return READ-FILE's bounded top-level form report."
   (declare (ignore tool))
   (handler-case
-      (tool-success (json-encode (lisp-ast--execute-read context arguments)))
+      (let ((*lisp-ast-dialect*
+              (lisp-ast--dialect-for-path (tool-argument arguments "path" :required t))))
+        (tool-success (json-encode (lisp-ast--execute-read context arguments))))
     (tool-authority-denied (condition)
       (tool-failure (princ-to-string condition) :denied-p t))
     (file-error (condition)
-
       (tool-failure (princ-to-string condition)))))
 
 (defmethod tool-execute ((tool lisp-ast-edit-tool) (context tool-context) (arguments hash-table))
   "Return EDIT-FORM's result after splicing one top-level form."
   (declare (ignore tool))
   (handler-case
-      (tool-success (json-encode (lisp-ast--execute-edit context arguments)))
+      (let ((*lisp-ast-dialect*
+              (lisp-ast--dialect-for-path (tool-argument arguments "path" :required t))))
+        (tool-success (json-encode (lisp-ast--execute-edit context arguments))))
     (tool-authority-denied (condition)
       (tool-failure (princ-to-string condition) :denied-p t))
     (resource-revision-stale (condition)
@@ -948,7 +1073,10 @@ element starts there (a stray close paren), or NIL when scanning reached END."
                          (context tool-context)
                          (arguments hash-table))
   "Answer one SEARCH call with one bounded page of matching forms."
-  (tool-success (json-encode (lisp-ast--execute-search context arguments))))
+  (declare (ignore tool))
+  (let ((*lisp-ast-dialect*
+          (lisp-ast--dialect-for-path (tool-argument arguments "path" :required t))))
+    (tool-success (json-encode (lisp-ast--execute-search context arguments)))))
 
 (defun lisp-ast--search-tool ()
   "Return the configured SEARCH tool instance."
@@ -956,7 +1084,7 @@ element starts there (a stray close paren), or NIL when scanning reached END."
                  :namespace "lisp-ast"
                  :name "search"
                  :description
-                 "Search a Common Lisp source file by form structure: match a head symbol and an optional name substring, at a given nesting depth. One call reports a bounded page; when NEXT-INDEX is non-nil, pass it as START-INDEX to read the next page."
+                  "Search a Lisp-family source file by form structure: match a head symbol and an optional name substring, at a given nesting depth. One call reports a bounded page; when NEXT-INDEX is non-nil, pass it as START-INDEX to read the next page."
                  :parameters
                  (tool-object-schema
                   (json-object
@@ -974,7 +1102,7 @@ element starts there (a stray close paren), or NIL when scanning reached END."
                  :namespace "lisp-ast"
                  :name "read-file"
                  :description
-                 "Read a Common Lisp source file as top-level forms: each form's head symbol, name, line span, and character offsets. One call reports a bounded page; when NEXT-INDEX is non-nil, pass it as START-INDEX to read the next page."
+                  "Read a Lisp-family source file as top-level forms: each form's head symbol, name, line span, and character offsets. One call reports a bounded page; when NEXT-INDEX is non-nil, pass it as START-INDEX to read the next page."
                  :parameters
                  (tool-object-schema
                   (json-object
@@ -992,7 +1120,7 @@ element starts there (a stray close paren), or NIL when scanning reached END."
                  :namespace "lisp-ast"
                  :name "edit-form"
                  :description
-                 "Replace one form of a Common Lisp source file, or insert a form before or after it, matching by head symbol and optional name at a given nesting depth; the rest of the file stays byte for byte identical."
+                  "Replace one form of a Lisp-family source file, or insert a form before or after it, matching by head symbol and optional name at a given nesting depth; the rest of the file stays byte for byte identical."
                  :parameters
                  (tool-object-schema
                   (json-object
@@ -1000,7 +1128,7 @@ element starts there (a stray close paren), or NIL when scanning reached END."
                    "form-type" (tool-string-property "Head symbol to match, for example defun, defclass, setf, or let; case-insensitive.")
                    "form-name" (tool-string-property "Optional name to match, for example the function or class name; case-insensitive. Omit to match by head alone.")
                    "operation" (tool-string-property "One of replace, insert-before, or insert-after.")
-                   "new-form" (tool-string-property "Exactly one complete Common Lisp form to write.")
+                     "new-form" (tool-string-property "Exactly one complete Lisp-family form to write.")
                    "depth" (tool-integer-property "Nesting depth to search: 0 matches top-level forms, N matches forms at depth N, -1 searches every depth; the default is 0.")
                    "form-index" (tool-integer-property "Optional one-based index among matching forms when several share the type and name.")
                    "dry-run" (tool-boolean-property "True to preview the targeted form without writing the file."))
@@ -1011,7 +1139,7 @@ element starts there (a stray close paren), or NIL when scanning reached END."
   "Register the AST tools into REGISTRY and return REGISTRY."
   (tool-registry-describe-namespace
    registry "lisp-ast"
-   "Read and edit Common Lisp source files as balanced top-level forms. lisp-ast.read-file reports form spans; lisp-ast.search finds forms by head symbol, name substring and nesting depth; lisp-ast.edit-form replaces, inserts before, or inserts after one form matched by head symbol and name.")
+    "Read and edit Lisp-family source files as balanced top-level forms. lisp-ast.read-file reports form spans; lisp-ast.search finds forms by head symbol, name substring and nesting depth; lisp-ast.edit-form replaces, inserts before, or inserts after one form matched by head symbol and name.")
   (tool-registry-register registry (lisp-ast--read-tool))
   (tool-registry-register registry (lisp-ast--search-tool))
   (tool-registry-register registry (lisp-ast--edit-tool))
