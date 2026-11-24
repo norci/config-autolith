@@ -692,7 +692,7 @@ leaves the estimate alone."
        (and (slot-boundp application 'tool-registry)
             (application-tool-registry application))))))
 
-(defmethod agent-should-compact-p :around ((agent agent))
+(defmethod agent-should-compact-p :around ((agent agent) &key &allow-other-keys)
   "Follow the proxy's reading instead of summing stored history it never carried."
   (bili--adopt-context-usage-for (agent-conversation agent)
                                  (agent-provider agent)
