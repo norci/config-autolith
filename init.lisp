@@ -6,15 +6,16 @@
         (load (merge-pathnames (format nil "autolith/extensions/~A.lisp" name)
                                (uiop:xdg-config-home))))
       '(
+	"models"
 	"openrouter-routing"
+        "always-selected-skills"
         "billion-context"
         "lisp-ast-tools"
         "lisp-file-helpers"
         "lisp-helper-autoload"
-        "reminder"
         "personal-instructions"
-        "always-selected-skills"
-          "web-search"
+        "reminder"
+        "web-search"
 	))
 
 (setf *conversation-title-generation-output-tokens* 4096)
