@@ -38,14 +38,15 @@
   (setf (symbol-function 'system-prompt--without-personal-instructions)
         (symbol-function 'system-prompt)))
 
-(defun system-prompt (configuration)
-  "Return the harness system prompt with the personal instructions appended."
-  (let ((prompt (system-prompt--without-personal-instructions configuration))
-        (extra  (and (null *system-prompt-override*)
-                     (personal-instructions-text))))
-    (if extra
-        (format nil "~A~2%Personal instructions from ~A follow.~2%~A"
-                prompt
-                (namestring *personal-instructions-path*)
-                extra)
-        prompt)))
+(setf (symbol-function 'system-prompt)
+      (lambda (configuration)
+        "Return the harness system prompt with the personal instructions appended."
+        (let ((prompt (system-prompt--without-personal-instructions configuration))
+              (extra  (and (null *system-prompt-override*)
+                           (personal-instructions-text))))
+          (if extra
+              (format nil "~A~2%Personal instructions from ~A follow.~2%~A"
+                      prompt
+                      (namestring *personal-instructions-path*)
+                      extra)
+              prompt))))

@@ -114,6 +114,8 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
          (char= (char text (1+ index)) #\")
          (char= (char text (+ index 2)) #\")))
 
+(-> lisp-ast--string-prefix-end ((vector character) (integer 0))
+    (values (option (integer 0)) boolean))
 (-> lisp-ast--quoted-end ((vector character) (integer 0) boolean boolean)
     (values (integer 0) boolean))
 (lisp-ast--defscan lisp-ast--quoted-end (text index formatted-p triple-p)
@@ -168,8 +170,6 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
     "Return the index past the string starting at INDEX."
     (lisp-ast--quoted-end text index nil (lisp-ast--triple-quote-p text index)))
 
-  (-> lisp-ast--string-prefix-end ((vector character) (integer 0))
-      (values (option (integer 0)) boolean))
   (defun lisp-ast--string-prefix-end (text index)
     "Return the quote index and FORMATTED-P for a Hy string prefix at INDEX."
     (let ((limit (length text))
@@ -252,6 +252,7 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
       (#\{ #\})
       (otherwise #\))))
 
+(-> lisp-ast--element-end ((vector character) (integer 0)) (values (integer 0) boolean))
 (-> lisp-ast--form-end ((vector character) (integer 0)) (values (integer 0) boolean))
 (lisp-ast--defscan lisp-ast--form-end (text index)
   :doc "Return the index just past the balanced form starting at INDEX."
@@ -280,7 +281,6 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
                     (values end complete-p))))))))
   :call (scan (1+ index) (list closer)))
 
-(-> lisp-ast--element-end ((vector character) (integer 0)) (values (integer 0) boolean))
 (lisp-ast--defscan lisp-ast--element-end (text index)
   :doc "Return the end of one balanced form element starting at INDEX."
   :definitions
@@ -468,6 +468,7 @@ of the guarded list form."
                    (setf hi (1- middle)))))
     (1+ lo)))
 
+(-> lisp-ast--forms-in (string (integer 0) (integer 0)) (values list (option (integer 0))))
 (-> lisp-ast--top-level-forms (string) (values list (option (integer 0))))
 (defun lisp-ast--top-level-forms (text)
   "Return the located top-level forms of TEXT in source order.
@@ -827,6 +828,7 @@ closes, or text after the single form."
    "end-line" (lisp-ast--line-of starts (1- (lisp-ast-form-end form)))
    "form-source" (lisp-ast--bounded-source content (lisp-ast-form-start form) (lisp-ast-form-end form))))
 
+(-> lisp-ast--all-entries (string list (option (integer 0))) list)
 (-> lisp-ast--execute-edit (tool-context json-object) json-object)
 (defun lisp-ast--edit-depth (arguments)
   "Return how deep EDIT-FORM searches; a negative value means every depth."

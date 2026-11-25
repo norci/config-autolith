@@ -115,12 +115,20 @@ by *SKILL-SELECTION-CHARACTER-LIMIT* counts selected skill instructions only."
          (not (getf (rest record) ':automatic-p)))))
 
 (-> skill-request-contributions (configuration conversation) list)
-(defun skill-request-contributions (configuration conversation)
-  "Return catalog and always-selected skill contributions for one provider request."
-  (let* ((catalog  (skill-catalog-for-configuration configuration))
-         (selected (skill--request-contributions-for-catalog catalog conversation)))
-    (skill--bound-warning-contributions
-     (if (and (eq *always-selected-skill-injection-mode* ':user-prompt)
-              (not (skill--user-prompt-p conversation)))
-         selected
-          (skill--always-selected-contributions catalog selected)))))
+(defvar *always-selected-skills-wrapper* nil
+  "The exact wrapper this file installed on SKILL-REQUEST-CONTRIBUTIONS.")
+
+(unless (eq (symbol-function 'skill-request-contributions)
+            *always-selected-skills-wrapper*)
+  (setf *always-selected-skills-wrapper*
+        (lambda (configuration conversation)
+          "Return catalog and always-selected skill contributions for one provider request."
+          (let* ((catalog  (skill-catalog-for-configuration configuration))
+                 (selected (skill--request-contributions-for-catalog catalog conversation)))
+            (skill--bound-warning-contributions
+             (if (and (eq *always-selected-skill-injection-mode* ':user-prompt)
+                      (not (skill--user-prompt-p conversation)))
+                 selected
+                 (skill--always-selected-contributions catalog selected)))))
+        (symbol-function 'skill-request-contributions)
+        *always-selected-skills-wrapper*))

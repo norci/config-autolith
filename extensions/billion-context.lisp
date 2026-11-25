@@ -288,6 +288,24 @@ must not escape: a failed restore leaves traffic direct for the next turn."
         (bili-route-provider-endpoint)
         t))))
 
+(-> bili--compression-status (conversation) (values (option hash-table) (option string)))
+(defun bili--compression-status (conversation)
+  "Return the proxy's status for CONVERSATION and an error string, or NIL.
+
+The second value names why no status came back, so a caller can report the
+failure instead of silently showing nothing."
+  (handler-case
+      (multiple-value-bind (payload status)
+          (dexador:get
+           (format nil "~A/__bili/plugin/status?fallback=latest&conversationId=~A"
+                   *bili-proxy-origin* (conversation-identifier conversation))
+           :force-string t :connect-timeout 1 :read-timeout 1 :proxy nil)
+        (if (<= 200 status 299)
+            (values (json-decode payload) nil)
+            (values nil (format nil "the proxy answered HTTP ~D for the status request." status))))
+    (error (condition)
+      (values nil (princ-to-string condition)))))
+
 (-> bili-status (&optional conversation) list)
 (defun bili-status (&optional conversation)
   "Return the proxy reachability, activation state, and live plugin status.
@@ -415,7 +433,7 @@ LAUNCH-PROGRAM returns once the child is spawned; RUN-PROGRAM waits for the
 child to exit, which for a server never happens."
   (let ((port (bili--origin-port *bili-proxy-origin*)))
     (uiop:launch-program
-     (append (list "bili" "start" "--no-auto-update")
+     (append (list "bunx" "billion-context" "start")
              (when port (list "--port" (princ-to-string port))))
      :output nil :error-output nil)))
 (-> bili-ensure-proxy (&key (:timeout number)) boolean)
@@ -460,27 +478,6 @@ late proxy from being unused for the rest of the session."
           *bili-registry-wrapper*)))
 
 (bili--activate-proxy)
-
-;;;; -- Compression status --
-
-(-> bili--compression-status (conversation) (values (option hash-table) (option string)))
-
-(defun bili--compression-status (conversation)
-  "Return the proxy's status for CONVERSATION and an error string, or NIL.
-
-The second value names why no status came back, so a caller can report the
-failure instead of silently showing nothing."
-  (handler-case
-      (multiple-value-bind (payload status)
-          (dexador:get
-           (format nil "~A/__bili/plugin/status?fallback=latest&conversationId=~A"
-                   *bili-proxy-origin* (conversation-identifier conversation))
-           :force-string t :connect-timeout 1 :read-timeout 1 :proxy nil)
-        (if (<= 200 status 299)
-            (values (json-decode payload) nil)
-            (values nil (format nil "the proxy answered HTTP ~D for the status request." status))))
-    (error (condition)
-      (values nil (princ-to-string condition)))))
 
 ;;;; -- Wire reading --
 
