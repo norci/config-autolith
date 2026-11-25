@@ -10,4 +10,14 @@
      "python:bunx,-p,pyright,pyright-langserver,--stdio"
      "rust:rust-analyzer"
      "typescript:bunx,typescript-language-server,--stdio")
-    :DIRECTORY :WORKSPACE))))
+    :DIRECTORY :WORKSPACE))
+   (:NAME "hy-repl" :TRANSPORT
+    (:TYPE :STDIO
+     :COMMAND "uvx"
+     :ARGUMENTS
+       ("--from" "/home/josephx/code/hy-repl-mcp"
+        "hy-repl-mcp")
+     :DIRECTORY :WORKSPACE)
+    :APPROVAL :PROMPT
+    :STARTUP-TIMEOUT-SECONDS 30
+    :TOOL-TIMEOUT-SECONDS 300)))
