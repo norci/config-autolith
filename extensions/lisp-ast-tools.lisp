@@ -356,7 +356,7 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
                 ((char= c #\") (lisp-ast--skip-string text i))
                 ((char= c #\;) (values (lisp-ast--skip-line-comment text i) t))
                 ((char= c #\#) (sharp i))
-                ((find c "'`," :test #'char=)
+                ((find c "'`,~" :test #'char=)
                  (scan (if (and (< (1+ i) limit)
                                 (char= (char text (1+ i)) #\@))
                            (+ i 2)
