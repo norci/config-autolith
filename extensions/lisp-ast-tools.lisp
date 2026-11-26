@@ -66,12 +66,12 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
   (and (find character #(#\space #\tab #\newline #\return #\page) :test #'char=)
        t))
 
-(-> lisp-ast--skip-line-comment ((vector character) (integer 0)) (integer 0))
+(-> lisp-ast--skip-line-comment (string (integer 0)) (integer 0))
 (defun lisp-ast--skip-line-comment (text index)
   "Return the index of the newline closing the comment starting at INDEX."
   (or (position #\newline text :start index) (length text)))
 
-(-> lisp-ast--skip-block-comment ((vector character) (integer 0)) (integer 0))
+(-> lisp-ast--skip-block-comment (string (integer 0)) (integer 0))
 (lisp-ast--defscan lisp-ast--skip-block-comment (text index)
   :doc "Skip one nested #| block comment; INDEX points at its #."
   :definitions
@@ -82,7 +82,7 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
                  (char= (char text i) #\|)
                  (char= (char text (1+ i)) #\#))
             (if (= depth 1)
-                i
+                (+ i 2)
                 (scan (+ i 2) (1- depth))))
            ((and (< (1+ i) limit)
                  (char= (char text i) #\#)
@@ -91,7 +91,7 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
            (t (scan (1+ i) depth)))))
   :call (scan (+ index 2) 1))
 
-(-> lisp-ast--skip-atmosphere ((vector character) (integer 0)) (integer 0))
+(-> lisp-ast--skip-atmosphere (string (integer 0)) (integer 0))
 (lisp-ast--defscan lisp-ast--skip-atmosphere (text index)
   :doc "Return the next non-whitespace, non-comment index at or after INDEX."
   :definitions
@@ -107,16 +107,16 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
            (t i))))
   :call (scan index))
 
-  (-> lisp-ast--triple-quote-p ((vector character) (integer 0)) boolean)
+  (-> lisp-ast--triple-quote-p (string (integer 0)) boolean)
   (defun lisp-ast--triple-quote-p (text index)
     "Return T when INDEX starts a Hy triple quote."
     (and (< (+ index 2) (length text))
          (char= (char text (1+ index)) #\")
          (char= (char text (+ index 2)) #\")))
 
-(-> lisp-ast--string-prefix-end ((vector character) (integer 0))
+(-> lisp-ast--string-prefix-end (string (integer 0))
     (values (option (integer 0)) boolean))
-(-> lisp-ast--quoted-end ((vector character) (integer 0) boolean boolean)
+(-> lisp-ast--quoted-end (string (integer 0) boolean boolean)
     (values (integer 0) boolean))
 (lisp-ast--defscan lisp-ast--quoted-end (text index formatted-p triple-p)
   :doc "Return the end of the string whose quote is at INDEX."
@@ -165,7 +165,7 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
                   (field (1+ i) depth)))))))
   :call (quoted (+ index (if triple-p 3 1)) 0))
 
-  (-> lisp-ast--skip-string ((vector character) (integer 0)) (values (integer 0) boolean))
+  (-> lisp-ast--skip-string (string (integer 0)) (values (integer 0) boolean))
   (defun lisp-ast--skip-string (text index)
     "Return the index past the string starting at INDEX."
     (lisp-ast--quoted-end text index nil (lisp-ast--triple-quote-p text index)))
@@ -186,14 +186,14 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
           (values i formatted-p)))))
 
   (-> lisp-ast--skip-prefixed-string
-      ((vector character) (integer 0) (integer 0) boolean) (values (integer 0) boolean))
+      (string (integer 0) (integer 0) boolean) (values (integer 0) boolean))
   (defun lisp-ast--skip-prefixed-string (text index quote-index formatted-p)
     "Skip the prefixed Hy string whose prefix starts at INDEX."
     (declare (ignore index))
     (lisp-ast--quoted-end text quote-index formatted-p
                           (lisp-ast--triple-quote-p text quote-index)))
 
-  (-> lisp-ast--prefixed-string-end ((vector character) (integer 0))
+(-> lisp-ast--prefixed-string-end (string (integer 0))
       (values (option (integer 0)) boolean))
   (defun lisp-ast--prefixed-string-end (text index)
     "Return the end of a Hy prefixed string starting at INDEX, if any."
@@ -203,7 +203,7 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
         (when quote
           (lisp-ast--skip-prefixed-string text index quote formatted-p)))))
 
-(-> lisp-ast--skip-character-literal ((vector character) (integer 0)) (values (integer 0) boolean))
+(-> lisp-ast--skip-character-literal (string (integer 0)) (values (integer 0) boolean))
 (lisp-ast--defscan lisp-ast--skip-character-literal (text index)
   :doc "Skip one #\\ character literal; INDEX points at its #."
   :with ((i (+ index 2)))
@@ -217,7 +217,7 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
           ((alphanumericp (char text i)) (values (scan i) t))
           (t (values (min limit (1+ i)) t))))
 
-(-> lisp-ast--token-end ((vector character) (integer 0)) (values (integer 0) boolean))
+(-> lisp-ast--token-end (string (integer 0)) (values (integer 0) boolean))
 (lisp-ast--defscan lisp-ast--token-end (text index)
   :doc "Return the end of the token starting at INDEX."
   :with ((delimiters (if (lisp-ast--hy-p)
@@ -252,8 +252,8 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
       (#\{ #\})
       (otherwise #\))))
 
-(-> lisp-ast--element-end ((vector character) (integer 0)) (values (integer 0) boolean))
-(-> lisp-ast--form-end ((vector character) (integer 0)) (values (integer 0) boolean))
+(-> lisp-ast--element-end (string (integer 0)) (values (integer 0) boolean))
+(-> lisp-ast--form-end (string (integer 0)) (values (integer 0) boolean))
 (lisp-ast--defscan lisp-ast--form-end (text index)
   :doc "Return the index just past the balanced form starting at INDEX."
   :with ((closer (lisp-ast--closing-delimiter (char text index))))
@@ -285,7 +285,7 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
   :doc "Return the end of one balanced form element starting at INDEX."
   :definitions
       ((tag-char-p (c)
-         (or (alphanumericp c) (find c "_!?-+*" :test #'char=)))
+           (or (alphanumericp c) (find c "_!?-+*^" :test #'char=)))
        (scan-tag (i)
          (if (and (< i limit) (tag-char-p (char text i)))
              (scan-tag (1+ i))
@@ -316,9 +316,12 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
                                 (values limit nil)
                                 (scan second)))
                           (values first-end nil))))))
-             ((and (lisp-ast--hy-p) (tag-char-p (char text next)))
-              (scan (scan-tag next)))
-             (t (scan (scan-modifier next))))))
+               ((and (lisp-ast--hy-p) (tag-char-p (char text next)))
+                (let ((after-tag (lisp-ast--skip-atmosphere text (scan-tag next))))
+                  (if (>= after-tag limit)
+                      (values limit nil)
+                      (scan after-tag))))
+                 (t (scan (scan-modifier next))))))
        (scan (i)
          (cond
            ((>= i limit) (values limit nil))
@@ -398,7 +401,7 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
           (t
            (return nil)))))))
 
-(-> lisp-ast--form-head ((vector character) (integer 0) (integer 0)) (option string))
+(-> lisp-ast--form-head (string (integer 0) (integer 0)) (option string))
 (defun lisp-ast--form-head (text start end)
   "Return the head symbol text of the list form spanning [START,END), or NIL.
 
@@ -417,7 +420,7 @@ list form."
                 (when (> token-end i)
                   (subseq text i token-end))))))))))
 
-(-> lisp-ast--form-name ((vector character) (integer 0) (integer 0)) (option string))
+(-> lisp-ast--form-name (string (integer 0) (integer 0)) (option string))
 (defun lisp-ast--form-name (text start end)
   "Return the named subject of the list form spanning [START,END), or NIL.
 
@@ -526,7 +529,7 @@ to its end."
 ;;; -- Read Execution --
 
 (-> lisp-ast--read-matches-p
-    ((vector character) lisp-ast-form (option string) (option string)) boolean)
+    (string lisp-ast-form (option string) (option string)) boolean)
 (defun lisp-ast--read-matches-p (text form name-pattern content-pattern)
   "Return T when FORM passes READ-FILE's optional filters."
   (and (or (null name-pattern)
@@ -546,22 +549,6 @@ to its end."
       (format nil "complete: all ~D matched forms." total)
       (format nil "complete: forms ~D-~D of ~D; pass start-index ~D for the next range."
               start (+ start shown -1) total next-index)))
-
-(-> lisp-ast--check-page-fits (list (option integer) integer integer) t)
-(defun lisp-ast--check-page-fits (shown next-index maximum total)
-  "Signal TOOL-ERROR rather than return fewer forms than the caller asked for.
-
-A budget-shortened page reads like a complete one, so refuse it and name the
-largest page that fits."
-  (when (and next-index (< (length shown) maximum))
-    (error 'tool-error
-           :message (if (null shown)
-                        (format nil "The next matched form alone exceeds one response and ~D forms remain. Narrow the search with name-pattern or content-pattern."
-                                total)
-                        (format nil "One response holds ~D of the ~D forms requested and ~D of ~D matched forms remain. Pass max-forms ~D to receive that complete range."
-                                (length shown) maximum (- total (length shown)) total (length shown)))
-           :code      ':page-exceeds-response
-           :tool-name "lisp-ast.read-file")))
 
 (defun lisp-ast--read-rows (starts matches start maximum)
   "Return (VALUES ROWS NEXT-INDEX) for MATCHES from START.
@@ -650,7 +637,6 @@ element starts at that character. FORMS-TRUNCATED reports that TEXT ended inside
         (lisp-ast--check-start-index start matches)
         (multiple-value-bind (shown next-index)
             (lisp-ast--read-rows starts matches start maximum)
-           (lisp-ast--check-page-fits shown next-index maximum (length matches))
            (json-object
            "paging" (lisp-ast--page-notice start (length shown) (length matches) next-index)
            "path" path
@@ -709,7 +695,7 @@ closes, or text after the single form."
              :tool-name "lisp-ast.edit-form"))))
 
 
-(-> lisp-ast--form-matches-p (lisp-ast-form string string) boolean)
+(-> lisp-ast--form-matches-p (lisp-ast-form string (option string)) boolean)
 (defun lisp-ast--form-matches-p (form form-type form-name)
   "Return T when FORM's head matches TYPE and NAME matches or was omitted."
   (and (lisp-ast-form-head form)
@@ -733,7 +719,7 @@ closes, or text after the single form."
                      (lisp-ast-form-start form)
                      (lisp-ast-form-end form)))))
 
-(-> lisp-ast--select-form (list (option integer) string string list) lisp-ast-form)
+(-> lisp-ast--select-form (list (option integer) string (option string) list) lisp-ast-form)
 (defun lisp-ast--select-form (matches form-index form-type form-name forms)
   "Return the one targeted FORM or signal a typed TOOL-ERROR."
   (cond
@@ -764,7 +750,7 @@ closes, or text after the single form."
             :tool-name "lisp-ast.edit-form"))))
 
 (-> lisp-ast--splice
-    ((vector character) simple-vector lisp-ast-form string string) string)
+    (string simple-vector lisp-ast-form string string) string)
 (defun lisp-ast--splice (content starts form operation new-form)
   "Return CONTENT with OPERATION applied around FORM using NEW-FORM."
   (let ((start (lisp-ast-form-start form))
@@ -814,7 +800,7 @@ closes, or text after the single form."
      "new-size" (length new-content))))
 
 (-> lisp-ast--edit-preview
-    (string string string string lisp-ast-form (vector character) simple-vector)
+     (string string string (option string) lisp-ast-form string simple-vector)
     json-object)
 (defun lisp-ast--edit-preview (path operation form-type form-name form content starts)
   "Return the dry-run report for one pending edit."
@@ -1094,8 +1080,7 @@ element starts there (a stray close paren), or NIL when scanning reached END."
                    "head" (tool-string-property "Exact head symbol name to match, case-insensitive; omit to match any head.")
                    "name-pattern" (tool-string-property "Optional case-insensitive substring filter on form names.")
                    "depth" (tool-integer-property "Nesting depth to descend: 0 reports top-level forms, -1 descends fully; the default is 0.")
-                   "start-index" (tool-integer-property "One-based index of the first matched form to report.")
-                   "max-forms" (tool-integer-property "Maximum number of matched forms to return; it must fit one response."))
+                    "max-forms" (tool-integer-property "Maximum number of forms to return in one bounded page; pass NEXT-INDEX as START-INDEX for the rest."))
                   '("path" "start-index" "max-forms"))))
 
 (defun lisp-ast--read-tool ()
@@ -1112,7 +1097,7 @@ element starts there (a stray close paren), or NIL when scanning reached END."
                    "name-pattern" (tool-string-property "Optional case-insensitive substring filter on form names.")
                    "content-pattern" (tool-string-property "Optional case-insensitive substring filter on form source text.")
                    "start-index" (tool-integer-property "One-based index of the first matched form to report; pass NEXT-INDEX from a previous result to continue.")
-                   "max-forms" (tool-integer-property "Maximum number of forms to return; it must fit one response."))
+                      "max-forms" (tool-integer-property "Maximum number of forms to return in one bounded page; pass NEXT-INDEX as START-INDEX for the rest."))
                   '("path" "start-index" "max-forms"))))
 
 (-> lisp-ast--edit-tool () lisp-ast-tool)
