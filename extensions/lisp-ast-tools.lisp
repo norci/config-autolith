@@ -217,12 +217,30 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
           ((alphanumericp (char text i)) (values (scan i) t))
           (t (values (min limit (1+ i)) t))))
 
+(-> lisp-ast--token-delimiter-p (character) boolean)
+(defmacro lisp-ast--delimiter-p (character hy-p)
+  "Expand to a character comparison against the token delimiters for HY-P."
+  `(or (char= ,character #\()
+       (char= ,character #\))
+       (char= ,character #\")
+       (char= ,character #\;)
+       (char= ,character #\')
+       (char= ,character #\`)
+       (char= ,character #\,)
+       (and ,hy-p
+            (or (char= ,character #\[)
+                (char= ,character #\])
+                (char= ,character #\{)
+                (char= ,character #\})
+                (char= ,character #\~)))))
+(defun lisp-ast--token-delimiter-p (character)
+  "Return T when CHARACTER ends a token in the active dialect."
+  (lisp-ast--delimiter-p character (lisp-ast--hy-p)))
+
 (-> lisp-ast--token-end (string (integer 0)) (values (integer 0) boolean))
 (lisp-ast--defscan lisp-ast--token-end (text index)
   :doc "Return the end of the token starting at INDEX."
-  :with ((delimiters (if (lisp-ast--hy-p)
-                           "()[]{}\";'`~,"
-                           "()\";'`,`")))
+  :with ((hy-p (lisp-ast--hy-p)))
   :definitions
       ((scan (i complete-p)
          (if (>= i limit)
@@ -239,7 +257,7 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
                         (scan (1+ close) complete-p)
                         (values limit nil))))
                  ((or (lisp-ast--whitespace-p c)
-                      (find c delimiters :test #'char=))
+                      (lisp-ast--delimiter-p c hy-p))
                   (values i complete-p))
                  (t (scan (1+ i) complete-p)))))))
   :call (scan index t))
@@ -401,24 +419,58 @@ DEFINITIONS supplies the local recursive functions; CALL starts the scan."
           (t
            (return nil)))))))
 
+(-> lisp-ast--head-token (string (integer 0) (integer 0)) (option string))
+(defun lisp-ast--head-token (text index end)
+  "Return the head token starting at INDEX in TEXT, up to END."
+  (let ((c (char text index)))
+    (when (and (char/= c #\")
+               (char/= c #\|)
+               (char/= c #\')
+               (char/= c #\#))
+      (let ((token-end (min end (lisp-ast--token-end text index))))
+        (when (> token-end index)
+          (subseq text index token-end))))))
+
+(-> lisp-ast--name-token (string (integer 0) (integer 0)) (option string))
+(-> lisp-ast--form-head-and-name
+    (string (integer 0) (integer 0))
+    (values (option string) (option string)))
+(defun lisp-ast--name-token (text index end)
+  "Return the name token starting at INDEX in TEXT, up to END."
+  (when (< index end)
+    (let ((c (char text index)))
+      (cond
+        ((or (char= c #\() (lisp-ast--hy-opener-p c))
+         (let ((inner-end (lisp-ast--form-end text index)))
+           (multiple-value-bind (inner-head inner-name)
+               (lisp-ast--form-head-and-name text index inner-end)
+             (cond ((and inner-head (string-equal inner-head "setf"))
+                    inner-name)
+                   (inner-head (lisp-ast--clean-name inner-head))))))
+        (t
+         (let ((name-end (min end (lisp-ast--token-end text index))))
+           (when (> name-end index)
+             (lisp-ast--clean-name (subseq text index name-end)))))))))
+
+(defun lisp-ast--form-head-and-name (text start end)
+  "Return the head and name of the list form spanning [START,END)."
+  (let ((list-start (lisp-ast--list-form-start text start end)))
+    (when list-start
+      (let ((i (lisp-ast--skip-atmosphere text (1+ list-start))))
+        (when (< i end)
+          (let* ((head (lisp-ast--head-token text i end))
+                 (name-start
+                   (lisp-ast--skip-atmosphere
+                    text (lisp-ast--element-end text i))))
+            (values head (lisp-ast--name-token text name-start end))))))))
+
 (-> lisp-ast--form-head (string (integer 0) (integer 0)) (option string))
 (defun lisp-ast--form-head (text start end)
   "Return the head symbol text of the list form spanning [START,END), or NIL.
 
 A form guarded by #+/#- reader conditionals reports the head of the guarded
 list form."
-  (let ((list-start (lisp-ast--list-form-start text start end)))
-    (when list-start
-      (let ((i (lisp-ast--skip-atmosphere text (1+ list-start))))
-        (when (< i end)
-          (let ((c (char text i)))
-            (when (and (char/= c #\")
-                       (char/= c #\|)
-                       (char/= c #\')
-                       (char/= c #\#))
-              (let ((token-end (min end (lisp-ast--token-end text i))))
-                (when (> token-end i)
-                  (subseq text i token-end))))))))))
+  (values (lisp-ast--form-head-and-name text start end)))
 
 (-> lisp-ast--form-name (string (integer 0) (integer 0)) (option string))
 (defun lisp-ast--form-name (text start end)
@@ -428,27 +480,7 @@ The name is the second element; a second element that is itself a list
 contributes its head, except for (setf ...) names, which contribute their
 second element. A form guarded by #+/#- reader conditionals reports the name
 of the guarded list form."
-  (let ((list-start (lisp-ast--list-form-start text start end)))
-    (when list-start
-      (let ((i (lisp-ast--skip-atmosphere text (1+ list-start))))
-        (when (< i end)
-          (setf i (lisp-ast--element-end text i))
-          (setf i (lisp-ast--skip-atmosphere text i))
-          (when (< i end)
-            (cond
-                  ((or (char= (char text i) #\()
-                       (lisp-ast--hy-opener-p (char text i)))
-               (let* ((inner-end (lisp-ast--form-end text i))
-                      (inner-head (lisp-ast--form-head text i inner-end)))
-                 (cond
-                   ((and inner-head (string-equal inner-head "setf"))
-                    (lisp-ast--form-name text i inner-end))
-                   (inner-head
-                    (lisp-ast--clean-name inner-head)))))
-              (t
-               (let ((name-end (min end (lisp-ast--token-end text i))))
-                 (when (> name-end i)
-                   (lisp-ast--clean-name (subseq text i name-end))))))))))))
+  (nth-value 1 (lisp-ast--form-head-and-name text start end)))
 
 (-> lisp-ast--line-starts (string) simple-vector)
 (defun lisp-ast--line-starts (text)
@@ -558,14 +590,17 @@ past *LISP-AST-RESULT-BUDGET* characters. NEXT-INDEX is the index of the
 first matched form left out, or NIL when the page reached the end."
   (let ((rows nil)
         (size 0)
+        (shown 0)
         (index start)
         (remaining (nthcdr (1- start) matches)))
-    (loop while (and remaining (< (length rows) maximum))
+    (loop while (and remaining (< shown maximum))
           do (let* ((row (lisp-ast--form-row starts (first remaining) index))
                     (row-size (length (argo:json-encode row))))
-               (when (and rows (> (+ size row-size) *lisp-ast-result-budget*))
+               (when (and (> shown 0)
+                          (> (+ size row-size) *lisp-ast-result-budget*))
                  (return))
                (push row rows)
+               (incf shown)
                (incf size row-size)
                (incf index)
                (setf remaining (rest remaining))))
@@ -935,13 +970,15 @@ element starts there (a stray close paren), or NIL when scanning reached END."
             (lisp-ast--element-end text i)
           (when (or (<= form-end form-start) (> form-end limit))
             (return (values (nreverse forms) i)))
-          (push (lisp-ast--make-form
-                 :start form-start
-                 :end form-end
-                 :head (lisp-ast--form-head text form-start form-end)
-                 :name (lisp-ast--form-name text form-start form-end)
-                 :truncated-p (not complete-p))
-                forms)
+            (multiple-value-bind (head name)
+                (lisp-ast--form-head-and-name text form-start form-end)
+              (push (lisp-ast--make-form
+                     :start form-start
+                     :end form-end
+                     :head head
+                     :name name
+                     :truncated-p (not complete-p))
+                    forms))
           (setf i form-end))))))
 
 (defun lisp-ast--children (text form)
@@ -973,13 +1010,16 @@ element starts there (a stray close paren), or NIL when scanning reached END."
 
 (defun lisp-ast--all-entries (text roots max-depth)
   "Return every (FORM DEPTH PARENT) entry of ROOTS in source order."
-  (let ((entries nil))
-    (dolist (root roots)
-      (setf entries
-            (nconc entries
-                   (nreverse
-                    (lisp-ast--collect-forms text root 0 max-depth nil nil)))))
-    entries))
+  (let ((entries nil)
+        (tail nil))
+    (dolist (root roots entries)
+      (let ((part (nreverse
+                   (lisp-ast--collect-forms text root 0 max-depth nil nil))))
+        (cond (entries
+               (setf (cdr tail) part))
+              (t
+               (setf entries part)))
+        (setf tail (last part))))))
 (defun lisp-ast--search-entries (text roots head name-pattern max-depth)
   "Return matching (FORM DEPTH PARENT) entries of ROOTS in source order."
   (remove-if-not
