@@ -1080,6 +1080,7 @@ element starts there (a stray close paren), or NIL when scanning reached END."
                    "head" (tool-string-property "Exact head symbol name to match, case-insensitive; omit to match any head.")
                    "name-pattern" (tool-string-property "Optional case-insensitive substring filter on form names.")
                    "depth" (tool-integer-property "Nesting depth to descend: 0 reports top-level forms, -1 descends fully; the default is 0.")
+                       "start-index" (tool-integer-property "One-based index of the first matched form to report; pass NEXT-INDEX from a previous result to continue.")
                     "max-forms" (tool-integer-property "Maximum number of forms to return in one bounded page; pass NEXT-INDEX as START-INDEX for the rest."))
                   '("path" "start-index" "max-forms"))))
 
