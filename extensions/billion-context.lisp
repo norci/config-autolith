@@ -126,6 +126,78 @@ or HTTP failure signals an error naming PATH so a tool call can report it."
   (declare (ignore tool))
   ':exclusive)
 
+(defun bili--summary-notes (summary &key (limit 8))
+  "Return bounded :COMPLETED notes carrying SUMMARY from one proxy fold."
+  (let* ((text     (string-trim '(#\Newline #\Return #\Tab #\Space)
+                                 (or summary "")))
+         (maximum  *continuation-note-maximum-characters*)
+         (notes    nil))
+    (when (zerop (length text))
+      (setf text "The proxy returned no summary text for the folded ranges."))
+    (loop with start = 0
+          while (< start (length text))
+          repeat limit
+          for end = (min (length text) (+ start maximum))
+          do (push (list :kind ':completed
+                         :text (subseq text start end)
+                         :refs nil)
+                   notes)
+             (setf start end))
+    (nreverse notes)))
+
+(defun bili--fold-continuation (prior summary &key (summary-limit 8)
+                                                    (prior-limit 8))
+  "Return a typed checkpoint folding SUMMARY into PRIOR."
+  (let* ((intent      (or (getf prior :intent)
+                          "Continue from the folded conversation."))
+         (next        (or (getf prior :next)
+                          (list :text "Continue the user's request from the folded context."
+                                :refs nil)))
+         (prior-notes (getf prior :notes))
+         (notes       (append (bili--summary-notes summary :limit summary-limit)
+                              (subseq prior-notes 0 (min (length prior-notes)
+                                                         prior-limit))))
+         (references  (getf prior :references))
+         (unsummarized (getf prior :unsummarized)))
+    (labels ((candidate (items)
+               (make-continuation :intent intent :notes items :next next
+                                  :references references
+                                  :unsummarized unsummarized)))
+      (loop while notes do
+        (let ((attempt (candidate notes)))
+          (when (null (continuation-problem attempt))
+            (return attempt)))
+        (setf notes (butlast notes)))
+      (candidate notes))))
+
+(defun bili--compress-result-text (result published-p)
+  "Return the proxy RESULT with the local publication outcome appended."
+  (format nil "~A~%~%[~A]"
+          (or result "")
+          (if published-p
+              "local checkpoint published"
+              "local checkpoint failed")))
+
+(defun bili--publish-local-fold (context summary)
+  "Publish one local checkpoint after a successful proxy COMPRESS."
+  (let* ((conversation (tool-context-conversation context))
+         (agent        (tool-context-agent context))
+         (prior        (conversation-continuation conversation))
+         (capture      (conversation-compaction-portable-capture
+                        (conversation-compaction-capture conversation)))
+         (continuation (bili--fold-continuation prior summary)))
+    (with-recursive-lock-held ((conversation-append-lock conversation))
+      (let ((unfinished (and agent (task-unfinished-work-snapshot agent)))
+            (validate   (and agent
+                             (lambda (candidate)
+                               (agent--validate-compaction-projection
+                                agent candidate :tools-p t)))))
+        (conversation-append-summary conversation continuation
+                                     :compaction capture
+                                     :unfinished-work unfinished
+                                     :validate-projection validate)))
+    t))
+
 (defmethod tool-execute ((tool bili-tool) (context tool-context) (arguments hash-table))
   "Forward one ACP tool call to the billion-context proxy."
   (let ((name (bili-tool-proxy-name tool)))
@@ -140,7 +212,19 @@ or HTTP failure signals an error naming PATH so a tool call can report it."
                                 "tool"           name
                                 "args"           arguments)))))
           (if (json-get response "ok")
-              (tool-success (or (json-get response "result") ""))
+              (let ((result (or (json-get response "result") "")))
+                (if (string= name "compress")
+                    (handler-case
+                        (progn
+                          (bili--publish-local-fold context result)
+                          (tool-success (bili--compress-result-text result t)))
+                      (error (condition)
+                        (tool-failure
+                         (format nil
+                                 "billion-context compress folded the proxy view, but the local checkpoint failed: ~A~%~%~A"
+                                 (princ-to-string condition)
+                                 (bili--compress-result-text result nil)))))
+                    (tool-success result)))
               (tool-failure
                (format nil "billion-context ~A refused the call: ~A"
                        name (or (json-get response "error") "no reason given")))))
@@ -620,9 +704,8 @@ window, and then names every compressible range so the agent folds them at once.
                      (< tokens (* *bili-compaction-reserve-share* limit)))
             tokens))))))
 
-(-> bili-suppresses-compaction-p (conversation) boolean)
 (defun bili-suppresses-compaction-p (conversation)
-  "Return true while the proxy owns CONVERSATION and its wire has headroom."
+  "Return true while the proxy's folded wire has headroom for CONVERSATION."
   (and (bili--headroom-tokens conversation) t))
 (-> bili--context-usage-sample (conversation t t integer) (option list))
 (defun bili--context-usage-sample (conversation provider registry tokens)
@@ -690,25 +773,16 @@ leaves the estimate alone."
             (application-tool-registry application))))))
 
 (defmethod agent-should-compact-p :around ((agent agent) &key &allow-other-keys)
-  "Follow the proxy's reading instead of summing stored history it never carried."
-  (bili--adopt-context-usage-for (agent-conversation agent)
-                                 (agent-provider agent)
-                                 (agent-tool-registry agent))
-  (if (bili-suppresses-compaction-p (agent-conversation agent))
-      nil
-      (call-next-method)))
+  "Defer native compaction while the proxy's folded wire has headroom."
+  (let ((conversation (agent-conversation agent)))
+    (bili--adopt-context-usage-for conversation (agent-provider agent) (agent-tool-registry agent))
+    (if (bili-suppresses-compaction-p conversation)
+        nil
+        (call-next-method))))
 
 (defmethod provider-request-input-token-estimate :around
     ((provider model-provider) (request hash-table))
-  "Report the proxy's wire reading instead of summing folded history.
-
-  While the proxy owns the conversation and its wire has headroom, local
-  admission must judge the request by the reading the proxy actually sends.
-  Both provider usage and host recomputation bound the folded wire, so either
-  source is safe here. The stored-history sum counts content the fold removed
-  and can refuse a request that fits. Once the wire is full the proxy no longer
-  replaces compaction, so defer to Autolith's own estimate and let the native
-  path measure compaction candidates."
+  "Report the proxy's wire reading while it bounds the folded request."
   (let* ((conversation (and *provider-context-request*
                             (getf *provider-context-request* :conversation)))
          (tokens (and conversation (bili--headroom-tokens conversation))))
